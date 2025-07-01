@@ -20,6 +20,7 @@ struct GlobalConfig {
     */
     int mom_kk = 30, mom_tt = 100; // median of means
     size_t seal_degree = 8192;
+    size_t seal_plain_modulus = 20;
     
     void parse_args(int argc, char** argv);
 

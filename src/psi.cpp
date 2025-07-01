@@ -2,6 +2,7 @@
 #include "random.hpp"
 #include "config.h"
 #include "seal/seal.h"
+#include <emp-sh2pc/emp-sh2pc.h>
 #include <unordered_set>
 #include <iostream>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 using namespace seal;
+using namespace emp;
 
 static std::unordered_map<std::string, PsiFunc>& registry() {
     static std::unordered_map<std::string, PsiFunc> impl;
@@ -152,9 +154,9 @@ void iosend(int party, emp::NetIO* io, const T& key) {
     auto size = key.save(stream, compr_mode_type::zstd);
     string str = stream.str();
     size_t send_size = str.size();
+    // std::cerr << "[Party " << party << "] Sent "<< typeid(T).name() << " bytes: " << send_size << std::endl;
     io->send_data(&send_size, sizeof(send_size));
     io->send_data(str.data(), send_size);
-    // std::cerr << "[Party " << party << "] Sent "<< typeid(T).name() << " bytes: " << send_size << std::endl;
 }
 
 template<typename T>
@@ -166,6 +168,20 @@ void iorecv(int party, emp::NetIO* io, const SEALContext& context, T& key) {
     std::stringstream stream(str);
     key.load(context, stream);
     // std::cerr << "[Party " << party << "] Received "<< typeid(T).name() << " bytes: " << recv_size << std::endl;
+}
+
+Integer mod_add(const Integer& a, const Integer& b, const Integer& p) {
+    std::cerr<<"sdofjsdljflskdjflksd"<<std::endl;
+    Integer sum = a + b;
+    std::cerr<<"sdofjsdljflskdjflksd"<<std::endl;
+    Bit over = sum >= p;
+    std::cerr<<"sdofjsdljflskdjflksd"<<std::endl;
+    return If(over, sum - p, sum);
+}
+
+Integer mod_mul(const Integer& a, const Integer& b, const Integer& p) {
+    Integer product = a * b;
+    return product % p; 
 }
 
 int psi_ca_prg_nondeter_He(int party, const std::vector<int>& input_set, emp::NetIO* io) {
@@ -371,6 +387,184 @@ int psi_ca_prg_nondeter_He(int party, const std::vector<int>& input_set, emp::Ne
 }
 
 
+int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set, emp::NetIO* io) {
+    /*int tot_rounds = get_config().mom_tt * get_config().mom_kk;
+    ASSERT_MSG(tot_rounds <= get_config().seal_degree, "one batch is not enough for #rounds");
+    EncryptionParameters parms(scheme_type::bfv);
+
+    // set parameters
+    size_t poly_modulus_degree = get_config().seal_degree;
+    parms.set_poly_modulus_degree(poly_modulus_degree);
+    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
+    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, get_config().seal_plain_modulus));
+
+    SEALContext context(parms);
+    print_parameters(context); 
+
+    // generate keys
+    KeyGenerator keygen(context);
+    SecretKey secret_key = keygen.secret_key();
+    PublicKey public_key_1, public_key_2;
+    keygen.create_public_key(public_key_1);
+    RelinKeys relin_key_1, relin_key_2;
+    keygen.create_relin_keys(relin_key_1);
+
+    BatchEncoder batch_encoder(context);
+    Encryptor encryptor(context, public_key_1);
+    Evaluator evaluator(context);
+    Decryptor decryptor(context, secret_key);
+
+    // send public key, relin key
+    iosend(party, io, public_key_1);
+    iosend(party, io, relin_key_1);
+    iorecv(party, io, context, public_key_2);
+    iorecv(party, io, context, relin_key_2);
+
+    // encrypt and send seeds
+    std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
+    AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
+    std::vector<std::vector<uint64_t>> batch_seed(get_config().seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
+
+    for(int now_round = 0; now_round < tot_rounds; ++now_round) {
+        std::vector<bool> seed = gen_seed.get_bits(now_round, get_config().seed_size);
+        for(int i = 0; i < get_config().seed_size; ++i) {
+            batch_seed[i][now_round] = seed[i] ? parms.plain_modulus().value() - 1 : 1;
+        }
+    }
+
+    std::vector<Plaintext> plain_seed(get_config().seed_size);
+    std::vector<Ciphertext> encrypted_seed(get_config().seed_size);
+    for(int i = 0; i < get_config().seed_size; ++i) {
+        batch_encoder.encode(batch_seed[i], plain_seed[i]);
+        encryptor.encrypt(plain_seed[i], encrypted_seed[i]);
+        iosend(party, io, encrypted_seed[i]);
+        iorecv(party, io, context, encrypted_seed[i]);
+        evaluator.multiply_plain_inplace(encrypted_seed[i], plain_seed[i]);
+    }
+
+    // estimate
+    std::cerr<<"[Party " << party << "] Starting estimation" << std::endl;
+    AESGen aes_gen(0);
+    std::unordered_map<uint64_t, Ciphertext> t_map;
+    std::stack<std::pair<int, Ciphertext>> t_stack_in;
+    std::vector<Ciphertext> calc_prg_2(get_config().prg_dd);
+
+    for(auto & item : input_set) {
+        std::vector<int> ids = aes_gen.get_id_group(0, item);
+        sort(ids.begin(), ids.end());
+        for(int i = 0; i < get_config().prg_dd; i+=2) {
+            if(i + 1 == get_config().prg_dd) {
+                calc_prg_2[i] = encrypted_seed[ids[i]];
+            } else {
+                uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
+                if(!t_map.count(key)) {
+                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i+1]], calc_prg_2[i]);
+                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+                    t_map[key] = calc_prg_2[i];
+                } else {
+                    calc_prg_2[i] = t_map[key];
+                }
+            }
+        }
+        for(int w = 2; w < get_config().prg_dd; w <<= 1) {
+            for(int i = 0; i + w < get_config().prg_dd; i += (w<<1)) {
+                evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
+                evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+            }
+        }
+        auto calc_prg = std::make_pair(1, calc_prg_2[0]);
+        while(!t_stack_in.empty()){
+            auto top = t_stack_in.top();
+            ASSERT_MSG(abs(top.first) >= abs(calc_prg.first), "stack top should be larger than current");
+            if(top.first == calc_prg.first) {
+                evaluator.add_inplace(calc_prg.second, top.second);
+                calc_prg.first <<= 1;
+                t_stack_in.pop();
+            } else break;
+        }
+        t_stack_in.push(calc_prg);
+    }
+    Ciphertext esti_cipher = t_stack_in.top().second;
+    t_stack_in.pop();
+    while(!t_stack_in.empty()) {
+        evaluator.add_inplace(esti_cipher, t_stack_in.top().second);
+        t_stack_in.pop();
+    }
+
+    // send back (mpc begins)
+    std::vector<uint64_t> rnd_x(batch_encoder.slot_count(), 0ull), rnd_y(batch_encoder.slot_count(), 0ull);
+    for(int i = 0; i < tot_rounds; ++i) {
+        rnd_x[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
+    }
+    Plaintext rnd_x_plain, rnd_y_plain;
+    batch_encoder.encode(rnd_x, rnd_x_plain);
+    evaluator.sub_plain_inplace(esti_cipher, rnd_x_plain);
+    iosend(party, io, esti_cipher);
+    iorecv(party, io, context, esti_cipher);
+    std::cerr<<"[Party " << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher) << std::endl;
+    decryptor.decrypt(esti_cipher, rnd_y_plain);
+    batch_encoder.decode(rnd_y_plain, rnd_y);*/
+
+	// NetIO * mpcio = new NetIO(party==ALICE ? nullptr : "127.0.0.1", 12345);
+	setup_semi_honest(io, party);
+    emp::Integer a(32, 20, ALICE);
+	emp::Integer b(32, 20, BOB);
+    // std::cerr<<"[Party " << party << "] jnbwearbnm 100000";
+	Bit res = a > b;
+    // std::cerr<<"[Party " << party << "] jnbwearbnm 200000";
+	std::cout << "ALICE larger?\t"<< res.reveal<bool>()<<endl;
+    // std::cerr<<"[Party " << party << "] jnbwearbnm 300000"<<std::endl;
+	finalize_semi_honest();
+    // std::cerr<<"[Party " << party << "] jnbwearbnm 400000"<<std::endl;
+    return 0;
+
+    /*
+    // prepare input sharing
+    std::cerr<<"[Party " << party << "] input sharing" << std::endl;
+    int mpcbitlen = 32;
+    std::vector<std::vector<Integer>> esti_x_1(get_config().mom_tt), esti_y_1(get_config().mom_tt), 
+        esti_x_2(get_config().mom_tt), esti_y_2(get_config().mom_tt);
+    std::cerr<<"[Party " << party << "] prepare input x y" << std::endl;
+    for(int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+        esti_x_1[tt].resize(get_config().mom_kk);
+        esti_x_2[tt].resize(get_config().mom_kk);
+        esti_y_1[tt].resize(get_config().mom_kk);
+        esti_y_2[tt].resize(get_config().mom_kk);
+        std::cerr<<"[Party " << party << "] prepare input x, tt = " << tt << std::endl;
+        for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+            esti_x_1[tt][kk] = Integer(mpcbitlen, rnd_x[i], party); // party 1 ALICE, 2 BOB
+            esti_x_2[tt][kk] = Integer(mpcbitlen, 0, 3-party);
+            esti_y_1[tt][kk] = Integer(mpcbitlen, rnd_y[i], party);
+            esti_y_2[tt][kk] = Integer(mpcbitlen, 0, 3-party);
+        }
+    }
+
+    // compute median of means
+    std::cerr<<"[Party " << party << "] begin compute" << std::endl;
+    Integer modp(mpcbitlen, parms.plain_modulus().value(), PUBLIC);
+    std::vector<Integer> esti_sum(get_config().mom_tt);
+    for(int tt = 0; tt < get_config().mom_tt; ++tt) {
+        std::cerr<<"[Party " << party << "] compute tt = " << tt << std::endl;
+        esti_sum[tt] = Integer(mpcbitlen, 0, PUBLIC);
+        for(int kk = 0; kk < get_config().mom_kk; ++kk) {
+            std::cerr<<"[Party " << party << "] compute kk = " << kk << std::endl;
+            Bit qwq = esti_x_1[tt][kk] > esti_x_2[tt][kk];
+            std::cerr<<"sdiklfgjsikdljfklsdjfk "<<qwq.reveal<bool>()<<std::endl;
+            return 0;
+            Integer esti_x = mod_add(esti_x_1[tt][kk], esti_x_2[tt][kk], modp);
+            std::cerr<<"[Party " << party << "] compute kk = " << kk << std::endl;
+            Integer esti_y = mod_add(esti_y_1[tt][kk], esti_y_2[tt][kk], modp);
+            std::cerr<<"[Party " << party << "] compute kk = " << kk << std::endl;
+            esti_sum[tt] = mod_add(esti_sum[tt], mod_mul(esti_x, esti_y, modp), modp);
+            std::cerr<<"[Party " << party << "] compute kk = " << kk << std::endl;
+        }
+    }
+    emp::sort(esti_sum.data(), get_config().mom_tt);
+    int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<int64_t>(PUBLIC);
+    finalize_semi_honest();
+    return psi_ca;*/
+}
+
 int psi_ca_prg_nondeter_He_simd(int party, const std::vector<int>& input_set, emp::NetIO* io) {
     int tot_rounds = get_config().mom_tt * get_config().mom_kk;
     ASSERT_MSG(tot_rounds <= get_config().seal_degree, "one batch is not enough for #rounds");
@@ -379,9 +573,8 @@ int psi_ca_prg_nondeter_He_simd(int party, const std::vector<int>& input_set, em
     // set parameters
     size_t poly_modulus_degree = get_config().seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    // parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
-    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 40, 40, 40, 40, 40}));
-    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, 20));
+    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
+    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, get_config().seal_plain_modulus));
 
     SEALContext context(parms);
     print_parameters(context); 
@@ -515,7 +708,6 @@ int psi_ca_prg_nondeter_He_simd(int party, const std::vector<int>& input_set, em
     }
 }
 
-
 // -----------------------------------------------------------
 
 struct _AutoRegister {
@@ -524,5 +716,6 @@ struct _AutoRegister {
         register_psi_method("prg_nondeter_naive", psi_ca_prg_nondeter_naive);
         register_psi_method("prg_nondeter_He", psi_ca_prg_nondeter_He);
         register_psi_method("prg_nondeter_He_simd", psi_ca_prg_nondeter_He_simd);
+        register_psi_method("prg_nondeter_He_simd_mpc", psi_ca_prg_nondeter_He_simd_mpc);
     }
 } _auto_register;

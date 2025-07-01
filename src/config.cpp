@@ -39,6 +39,10 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             mom_kk = std::stoi(val);
         } else if (auto val = get_value("--mom_tt="); !val.empty()) {
             mom_tt = std::stoi(val);
+        } else if (auto val = get_value("--seal_degree="); !val.empty()) {
+            seal_degree = std::stoul(val);
+        } else if (auto val = get_value("--seal_plain_modulus="); !val.empty()) {
+            seal_plain_modulus = std::stoul(val);
         } else if(auto val = get_value("--testmode="); !val.empty()) {
             test_mode = true;
             output_file = val;
