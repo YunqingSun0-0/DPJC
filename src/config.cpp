@@ -4,13 +4,22 @@
 #include <iostream>
 #include <random>
 #include <chrono>
+#include <cstring>
 
 GlobalConfig& get_config() {
     static GlobalConfig config;
     return config;
 }
 
-void GlobalConfig::parse_args(int argc, char** argv) {
+void GlobalConfig::parse_args(int argc, char** argv, int& party, int& port) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            party = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
+            port = std::atoi(argv[++i]);
+        }
+    }
+
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
 
@@ -50,8 +59,8 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             prg_seed = std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rng);
             input_seed = std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rng);
         }
-        else {
-            std::cerr << "Unknown argument: " << arg << std::endl;
-        }
+        // else {
+        //     std::cerr << "Unknown argument: " << arg << std::endl;
+        // }
     }
 }

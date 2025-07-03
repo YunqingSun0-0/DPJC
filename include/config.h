@@ -3,7 +3,7 @@
 #include <cstdint>
 
 struct GlobalConfig {
-    std::string psi_mode = "prg_nondeter_He_simd";
+    std::string psi_mode = "prg_nondeter_He_simd_mpc";
     bool test_mode = false;
     std::string output_file = "1.txt";
 
@@ -22,7 +22,7 @@ struct GlobalConfig {
     size_t seal_degree = 8192;
     size_t seal_plain_modulus = 20;
     
-    void parse_args(int argc, char** argv);
+    void parse_args(int argc, char** argv, int& party, int& port);
 
     std::string role_description(int party) const {
         return party == 1 ? "P1" : "P2";

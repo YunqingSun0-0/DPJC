@@ -77,7 +77,7 @@ void run_party(int party, int port) {
     if (party == 2) {
         std::cout << "[Party 2] PSI size: " << psi_size << std::endl;
         if(get_config().test_mode) {
-            std::ofstream fout(get_config().output_file, std::ios::app); // 追加写入
+            std::ofstream fout(get_config().output_file, std::ios::app);
             if (fout.is_open()) {
                 fout << (double) psi_size / precise_psi_size() << std::endl;
                 fout.close();
@@ -91,39 +91,12 @@ void run_party(int party, int port) {
     delete io;
 }
 
-// each party is a thread
-int main(int argc, char** argv) {
-    get_config().parse_args(argc, argv);
-
-    int port = 20929;
-
-    std::thread t1(run_party, 1, port);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 等待服务端先启动
-    std::thread t2(run_party, 2, port);
-
-    t1.join();
-    t2.join();
-
-    precise_psi_size();
-
-    return 0;
-}
-
-/*
 // each party is a process
 int main(int argc, char** argv) {
-    get_config().parse_args(argc, argv);
-
     int party = -1;
-    int port = 20929; // 默认端口
+    int port = 20929;
 
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-            party = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
-            port = std::atoi(argv[++i]);
-        }
-    }
+    get_config().parse_args(argc, argv, party, port);
 
     if (party != 1 && party != 2) {
         std::cerr << "Usage: " << argv[0] << " -p <1|2> [-port <port>]" << std::endl;
@@ -131,6 +104,27 @@ int main(int argc, char** argv) {
     }
 
     run_party(party, port);
+
+    if(party == 2) {
+        precise_psi_size();
+    }
     return 0;
 }
-*/
+
+// each party is a thread
+// int main(int argc, char** argv) {
+//     get_config().parse_args(argc, argv);
+
+//     int port = 20929;
+
+//     std::thread t1(run_party, 1, port);
+//     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//     std::thread t2(run_party, 2, port);
+
+//     t1.join();
+//     t2.join();
+
+//     precise_psi_size();
+
+//     return 0;
+// }
