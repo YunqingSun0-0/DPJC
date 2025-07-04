@@ -413,8 +413,7 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
 
     // generate and encrypt seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
-    // AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
-    AESGen gen_seed(19920929*party);
+    AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
     std::vector<std::vector<uint64_t>> batch_seed(get_config().seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
 
     for(int now_round = 0; now_round < tot_rounds; ++now_round) {
@@ -425,17 +424,18 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     }
 
     std::vector<Plaintext> plain_seed(get_config().seed_size);
-    std::vector<Ciphertext> encrypted_seed_1(get_config().seed_size);
+    std::vector<Ciphertext> encrypted_seed_1(get_config().seed_size), encrypted_seed_2(get_config().seed_size);
     for(int i = 0; i < get_config().seed_size; ++i) {
         batch_encoder.encode(batch_seed[i], plain_seed[i]);
         encryptor.encrypt(plain_seed[i], encrypted_seed_1[i]);
     }
 
     // send relin key and seeds
-    std::vector<Ciphertext> encrypted_seed_2(get_config().seed_size);
+    std::cerr<<"[Party " << party << "] Sending relin key and seeds" << std::endl;
     if(party == 1) {
         iosend(party, io, relin_key_1);
         for(int i = 0; i < get_config().seed_size; ++i) iosend(party, io, encrypted_seed_1[i]);
+        io->flush();
         iorecv(party, io, context, relin_key_2);
         for(int i = 0; i < get_config().seed_size; ++i) iorecv(party, io, context, encrypted_seed_2[i]);
     } else {
@@ -443,6 +443,7 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         for(int i = 0; i < get_config().seed_size; ++i) iorecv(party, io, context, encrypted_seed_2[i]);
         iosend(party, io, relin_key_1);
         for(int i = 0; i < get_config().seed_size; ++i) iosend(party, io, encrypted_seed_1[i]);
+        io->flush();
     }
     for(int i = 0; i < get_config().seed_size; ++i) {
         evaluator.multiply_plain_inplace(encrypted_seed_2[i], plain_seed[i]);
@@ -497,7 +498,77 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         t_stack_in.pop();
     }
 
-    // send back (mpc begins)
+    // sharing & multiply
+    std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
+    for(int i = 0; i < tot_rounds; ++i) {
+        rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
+    }
+    Plaintext rnd_1_plain, rnd_2_plain;
+    batch_encoder.encode(rnd_1, rnd_1_plain);
+    evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
+    if(party == 1) {
+        iosend(party, io, esti_cipher_1);
+        iorecv(party, io, context, esti_cipher_2);
+    } else {
+        iorecv(party, io, context, esti_cipher_2);
+        iosend(party, io, esti_cipher_1);
+    }
+    std::cerr<<"[Party " << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
+    decryptor.decrypt(esti_cipher_2, rnd_2_plain);
+    batch_encoder.decode(rnd_2_plain, rnd_2);
+
+    if(party == 1) {
+        iorecv(party, io, context, esti_cipher_1);
+        iorecv(party, io, context, esti_cipher_2);
+        evaluator.add_plain_inplace(esti_cipher_1, rnd_1_plain);
+        evaluator.add_plain_inplace(esti_cipher_2, rnd_2_plain);
+        evaluator.multiply_inplace(esti_cipher_1, esti_cipher_2);
+        for(int i = 0; i < tot_rounds; ++i) {
+            rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
+        }
+        batch_encoder.encode(rnd_1, rnd_1_plain);
+        evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
+        iosend(party, io, esti_cipher_1);
+    }
+    else{
+        encryptor.encrypt(rnd_1_plain, esti_cipher_1);
+        encryptor.encrypt(rnd_2_plain, esti_cipher_2);
+        iosend(party, io, esti_cipher_2);
+        iosend(party, io, esti_cipher_1);
+        iorecv(party, io, context, esti_cipher_2);
+        decryptor.decrypt(esti_cipher_2, rnd_2_plain);
+        batch_encoder.decode(rnd_2_plain, rnd_2);
+    }
+
+    // mpc - median of means
+	setup_semi_honest(io, party);
+    int mpcbitlen = 32;
+    Integer *esti_1 = new Integer[get_config().mom_tt], *esti_2 = new Integer[get_config().mom_tt], 
+        *esti_sum = new Integer[get_config().mom_tt];
+    Integer modp(mpcbitlen, parms.plain_modulus().value(), PUBLIC), mod23p(mpcbitlen, parms.plain_modulus().value()*2/3, PUBLIC);
+    for(int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+        int64_t val_1 = 0, val_2 = 0;
+        for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+            val_1 += rnd_1[i];
+            val_2 += rnd_2[i];
+        }
+        val_1 %= parms.plain_modulus().value();
+        val_2 %= parms.plain_modulus().value();
+        esti_1[tt] = Integer(mpcbitlen, val_1, ALICE);
+        esti_2[tt] = Integer(mpcbitlen, val_2, BOB);
+    }
+    for(int tt = 0; tt < get_config().mom_tt; ++tt){
+        esti_sum[tt] = mod_add(esti_1[tt], esti_2[tt], modp);
+        Bit over = esti_sum[tt] >= mod23p;
+        esti_sum[tt] = If(over, esti_sum[tt] - modp, esti_sum[tt]);
+    }
+    sort(esti_sum, get_config().mom_tt);
+    int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<int64_t>(PUBLIC);
+    delete[] esti_1, esti_2, esti_sum;
+    finalize_semi_honest();
+    return psi_ca / get_config().mom_kk;
+
+    /*// send back (mpc begins)
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
     for(int i = 0; i < tot_rounds; ++i) {
         rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
@@ -546,13 +617,10 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         esti_sum[tt] = If(over, esti_sum[tt] - modp, esti_sum[tt]);
     }
     sort(esti_sum, get_config().mom_tt);
-    for(int tt = 0; tt < get_config().mom_tt; ++tt) {
-        std::cerr<<"[Party " << party << "] esti_sum[" << tt << "] = " << esti_sum[tt].reveal<uint64_t>(PUBLIC) << std::endl;
-    }
     int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<uint64_t>(PUBLIC);
     delete[] esti_sum;
     finalize_semi_honest();
-    return psi_ca / get_config().mom_kk;
+    return psi_ca / get_config().mom_kk;*/
 }
 
 /*int psi_ca_prg_nondeter_He_simd(int party, const std::vector<int>& input_set, emp::NetIO* io) {
