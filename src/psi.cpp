@@ -392,7 +392,14 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     // set parameters
     size_t poly_modulus_degree = get_config().seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
+    // parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 52, 52, 36, 24, 24 }));
+    /* 
+    时间和层数严格相关，可以做一次乘法自动降一层，但是只能降两层，再降就层数不够用了
+    最后一个不能小于倒数第二个 25往上就没有好处了
+    56, 56, 56, 24, 24 -> 164 139 105 73 41 39
+    52, 52, 36, 24, 24 -> 136 111 76 44 12 7
+    */
     parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, get_config().seal_plain_modulus));
 
     SEALContext context(parms);
@@ -431,6 +438,12 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     }
 
     // send relin key and seeds
+    // SecretKey debug_sk;
+    // iosend(party, io, secret_key);
+    // iorecv(party, io, context, debug_sk);
+    // Decryptor debug_decryptor(context, debug_sk);
+    // std::cerr<<"[Party " << party << "] noise budget: " << decryptor.invariant_noise_budget(encrypted_seed_1[0]) << std::endl;
+
     std::cerr<<"[Party " << party << "] Sending relin key and seeds" << std::endl;
     if(party == 1) {
         iosend(party, io, relin_key_1);
@@ -447,7 +460,10 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     }
     for(int i = 0; i < get_config().seed_size; ++i) {
         evaluator.multiply_plain_inplace(encrypted_seed_2[i], plain_seed[i]);
+        // evaluator.relinearize_inplace(encrypted_seed_2[i], relin_key_2);
+        evaluator.mod_switch_to_next_inplace(encrypted_seed_2[i]);
     }
+    // std::cerr<<"[Party " << party << "] noise budget after multiply: " << debug_decryptor.invariant_noise_budget(encrypted_seed_2[0]) << std::endl;
 
     // estimate
     std::cerr<<"[Party " << party << "] Starting estimation" << std::endl;
@@ -462,21 +478,34 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         for(int i = 0; i < get_config().prg_dd; i+=2) {
             if(i + 1 == get_config().prg_dd) {
                 calc_prg_2[i] = encrypted_seed_2[ids[i]];
+                evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
             } else {
                 uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
                 if(!t_map.count(key)) {
                     evaluator.multiply(encrypted_seed_2[ids[i]], encrypted_seed_2[ids[i+1]], calc_prg_2[i]);
                     evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+                    evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
                     t_map[key] = calc_prg_2[i];
+                    // if(t_stack_in.empty() && i == 0) {
+                    //     std::cerr<<"[Party " << party << "] noise budget after first multiply: " 
+                    //         << debug_decryptor.invariant_noise_budget(calc_prg_2[i]) << std::endl;
+                    // }
                 } else {
                     calc_prg_2[i] = t_map[key];
                 }
             }
         }
         for(int w = 2; w < get_config().prg_dd; w <<= 1) {
-            for(int i = 0; i + w < get_config().prg_dd; i += (w<<1)) {
-                evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
-                evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+            for(int i = 0; i < get_config().prg_dd; i += (w<<1)) {
+                if(i + w < get_config().prg_dd) {
+                    evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
+                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+                }
+                // if(w == 2) evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
+                // if(t_stack_in.empty() && i == 0) {
+                //     std::cerr<<"[Party " << party << "] noise budget after multiply: " 
+                //         << debug_decryptor.invariant_noise_budget(calc_prg_2[i]) << std::endl;
+                // }
             }
         }
         auto calc_prg = std::make_pair(1, calc_prg_2[0]);
@@ -497,6 +526,8 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         evaluator.add_inplace(esti_cipher_1, t_stack_in.top().second);
         t_stack_in.pop();
     }
+    // std::cerr<<"[Party " << party << "] noise budget before sharing: " 
+    //     << debug_decryptor.invariant_noise_budget(esti_cipher_1) << std::endl;
 
     // sharing & multiply
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
@@ -533,6 +564,10 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     else{
         encryptor.encrypt(rnd_1_plain, esti_cipher_1);
         encryptor.encrypt(rnd_2_plain, esti_cipher_2);
+        evaluator.mod_switch_to_next_inplace(esti_cipher_1);
+        evaluator.mod_switch_to_next_inplace(esti_cipher_2);
+        evaluator.mod_switch_to_next_inplace(esti_cipher_1);
+        evaluator.mod_switch_to_next_inplace(esti_cipher_2);
         iosend(party, io, esti_cipher_2);
         iosend(party, io, esti_cipher_1);
         iorecv(party, io, context, esti_cipher_2);
