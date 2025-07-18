@@ -539,10 +539,12 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
     if(party == 1) {
         iosend(party, io, esti_cipher_1);
+        io->flush();
         iorecv(party, io, context, esti_cipher_2);
     } else {
         iorecv(party, io, context, esti_cipher_2);
         iosend(party, io, esti_cipher_1);
+        io->flush();
     }
     std::cerr<<"[Party " << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
@@ -560,6 +562,7 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         batch_encoder.encode(rnd_1, rnd_1_plain);
         evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
         iosend(party, io, esti_cipher_1);
+        io->flush();
     }
     else{
         encryptor.encrypt(rnd_1_plain, esti_cipher_1);
@@ -570,6 +573,7 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         evaluator.mod_switch_to_next_inplace(esti_cipher_2);
         iosend(party, io, esti_cipher_2);
         iosend(party, io, esti_cipher_1);
+        io->flush();
         iorecv(party, io, context, esti_cipher_2);
         decryptor.decrypt(esti_cipher_2, rnd_2_plain);
         batch_encoder.decode(rnd_2_plain, rnd_2);
