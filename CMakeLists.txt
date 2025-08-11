@@ -31,10 +31,28 @@ find_package(SEAL 4.1 REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
-add_executable(psi_ca
-    src/main.cpp
+# Server程序
+add_executable(psi_server
+    src/server.cpp
     src/psi.cpp
     src/config.cpp
 )
 
-target_link_libraries(psi_ca emp-tool SEAL::seal OpenSSL::Crypto pthread)
+target_link_libraries(psi_server emp-tool SEAL::seal OpenSSL::Crypto pthread)
+
+# Client程序
+add_executable(psi_client
+    src/client.cpp
+    src/psi.cpp
+    src/config.cpp
+)
+
+target_link_libraries(psi_client emp-tool SEAL::seal OpenSSL::Crypto pthread)
+
+# 数据生成程序
+add_executable(gendata
+    src/gendata.cpp
+    src/config.cpp
+)
+
+target_link_libraries(gendata pthread)

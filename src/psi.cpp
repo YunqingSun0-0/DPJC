@@ -12,141 +12,33 @@
 #include <stack>
 #include <cstring>
 #include <algorithm>
+#include <random>
+#include <chrono>
+#include <functional>
 using namespace seal;
 using namespace emp;
 
-static std::unordered_map<std::string, PsiFunc>& registry() {
-    static std::unordered_map<std::string, PsiFunc> impl;
-    return impl;
-}
+// static std::unordered_map<std::string, PsiFunc>& registry() {
+//     static std::unordered_map<std::string, PsiFunc> impl;
+//     return impl;
+// }
 
-void register_psi_method(const std::string& name, PsiFunc func) {
-    registry()[name] = func;
-}
+// void register_psi_method(const std::string& name, PsiFunc func) {
+//     registry()[name] = func;
+// }
 
-int compute_psi_ca(int party, const std::vector<int>& set, emp::NetIO* io) {
-    std::string mode = get_config().psi_mode;
-    // const char* env_mode = std::getenv("PSI_MODE");
-    // if (env_mode) mode = env_mode;
+// int compute_psi_ca(int party, const std::vector<int>& set, emp::NetIO* io) {
+//     std::string mode = get_config().psi_mode;
+//     // const char* env_mode = std::getenv("PSI_MODE");
+//     // if (env_mode) mode = env_mode;
 
-    if (!registry().count(mode)) {
-        throw std::runtime_error("Unregistered psi_mode: " + mode);
-    }
-    return registry()[mode](party, set, io);
-}
-
-// ---------- Naive PSI Implementation ----------
-
-int psi_ca_naive(int party, const std::vector<int>& input_set, emp::NetIO* io) {
-    if (party == 1) {
-        std::cerr<< "[Party 1] Sending input set: ";
-        for (const auto& item : input_set) {
-            std::cerr<< item << " ";
-            io->send_data(&item, sizeof(item));
-        }
-        int end_signal = -1;
-        io->send_data(&end_signal, sizeof(end_signal));
-        io->flush();
-        std::cerr<< std::endl;
-        return -1; 
-    } else {
-        std::unordered_set<int> set1;
-        char buffer[128];
-
-        std::cerr<< "[Party 2] Receiving input set: ";
-        while(1) {
-            io->recv_data(buffer, sizeof(int));
-            int item;
-            std::memcpy(&item, buffer, sizeof(int));
-            if (item == -1) break;
-            set1.insert(item);
-            std::cerr<< item << " ";
-        }
-        std::cerr<< std::endl;
-
-        std::cerr<< "[Party 2] set: ";
-        int intersection_size = 0;
-        for (const auto& item : input_set) {
-            std::cerr<< item << " ";
-            if (set1.count(item)) {
-                ++intersection_size;
-            }
-        }
-        std::cerr<< std::endl;
-
-        return intersection_size;
-    }
-}
-
-// ------------ prg_nondeter_naive Implementation ------------
-
-int psi_ca_prg_nondeter_naive(int party, const std::vector<int>& input_set, emp::NetIO* io) {
-    AESGen aes_gen(0);
-    int tot = get_config().mom_kk * get_config().mom_tt;
-    vector<int> esti;
-
-    for(int tt=0; tt<=tot; tt++) {
-        std::vector<bool> seed = aes_gen.get_bits(tt, get_config().seed_size);
-        int esti_val = 0;
-
-        for(auto & item : input_set) {
-            int rd = 0;
-            // std::vector<int> ids = aes_gen.get_id_group(tt, item);
-            std::vector<int> ids = aes_gen.get_id_group(0, item);
-            for(const auto & id : ids) {
-                rd ^= seed[id];
-            }
-            if(!rd) ++esti_val;
-            else --esti_val;
-        }
-        esti.push_back(esti_val);
-    }
-
-    if (party == 1) {
-        for(auto & item : esti) {
-            io->send_data(&item, sizeof(item));
-        }
-        io->flush();
-        return -1;
-    } else {
-        vector<int64_t> mom;
-        for(int tt = 0, i=0; tt < get_config().mom_tt; ++tt) {
-            int64_t tmp_tot = 0;
-            for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                int esti_val;
-                io->recv_data(&esti_val, sizeof(esti_val));
-                esti_val *= esti[i];
-                tmp_tot += esti_val;
-            }
-            mom.push_back(tmp_tot/ get_config().mom_kk); 
-        }
-        sort(mom.begin(), mom.end());
-
-        if(!get_config().test_mode) {
-            std::cerr<<"prg(no He) mom: ";
-            for (const auto& val : mom) {
-                std::cerr << val << " ";
-            }
-            std::cerr << std::endl;
-        }
-
-        return mom[mom.size()/2]; 
-    }
-}
+//     if (!registry().count(mode)) {
+//         throw std::runtime_error("Unregistered psi_mode: " + mode);
+//     }
+//     return registry()[mode](party, set, io);
+// }
 
 // ------------ prg_nondeter_He Implementation ------------
-
-void debug_decrypt_output(int party, int round, const SEALContext& context, 
-    const SecretKey& secret_key, const Ciphertext& encrypted) {
-    if(party == 2) return;
-    Decryptor decryptor(context, secret_key);
-    BatchEncoder batch_encoder(context);
-    Plaintext plain;
-    std::vector<uint64_t> decoded;
-    decryptor.decrypt(encrypted, plain);
-    batch_encoder.decode(plain, decoded);
-    std::cerr << decoded[round] << std::endl;
-}
 
 template<typename T>
 void iosend(int party, emp::NetIO* io, const T& key) {
@@ -182,377 +74,151 @@ Integer mod_mul(const Integer& a, const Integer& b, const Integer& p) {
     // 取模要多一个sign bit
 }
 
-/*int psi_ca_prg_nondeter_He(int party, const std::vector<int>& input_set, emp::NetIO* io) {
-    int tot_rounds = get_config().mom_tt * get_config().mom_kk;
-    ASSERT_MSG(tot_rounds <= get_config().seal_degree, "one batch is not enough for #rounds");
-    EncryptionParameters parms(scheme_type::bfv);
-
-    // set parameters
-    size_t poly_modulus_degree = get_config().seal_degree;
-    parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
-    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, 20));
-
-    SEALContext context(parms);
-    print_parameters(context); 
-
-    // generate keys
-    KeyGenerator keygen(context);
-    SecretKey secret_key = keygen.secret_key();
-    PublicKey public_key_1, public_key_2;
-    keygen.create_public_key(public_key_1);
-    RelinKeys relin_key_1, relin_key_2;
-    keygen.create_relin_keys(relin_key_1);
-
-    BatchEncoder batch_encoder(context);
-    Encryptor encryptor(context, public_key_1);
-    Evaluator evaluator(context);
-    Decryptor decryptor(context, secret_key);
-
-    // send public key, relin key
-    iosend(party, io, public_key_1);
-    iosend(party, io, relin_key_1);
-    iorecv(party, io, context, public_key_2);
-    iorecv(party, io, context, relin_key_2);
-
-    // iosend(party, io, secret_key);
-    // SecretKey debug_sk;
-    // iorecv(party, io, context, debug_sk);
-    // Decryptor debug_decryptor(context, debug_sk);
-
-    // encrypt and send seeds
-    std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
-    AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
-    std::vector<std::vector<uint64_t>> batch_seed(get_config().seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
-
-    for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-        std::vector<bool> seed = gen_seed.get_bits(now_round, get_config().seed_size);
-        for(int i = 0; i < get_config().seed_size; ++i) {
-            batch_seed[i][now_round] = seed[i] ? parms.plain_modulus().value() - 1 : 1;
+int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+    if(get_config().test_mode) {
+        uint64_t prg_seed = get_config().prg_seed;
+        if(party == 1) {
+            server_io->send_data(&prg_seed, sizeof(prg_seed));
+            server_io->flush();
+        } else {
+            server_io->recv_data(&prg_seed, sizeof(prg_seed));
         }
+        for(auto & client_io : client_connections) {
+            client_io->send_data(&prg_seed, sizeof(prg_seed));
+            client_io->flush();
+        }
+        get_config().prg_seed = prg_seed;
     }
-
-    std::vector<Plaintext> plain_seed(get_config().seed_size);
-    std::vector<Ciphertext> encrypted_seed(get_config().seed_size);
-    for(int i = 0; i < get_config().seed_size; ++i) {
-        batch_encoder.encode(batch_seed[i], plain_seed[i]);
-        encryptor.encrypt(plain_seed[i], encrypted_seed[i]);
-        iosend(party, io, encrypted_seed[i]);
-        iorecv(party, io, context, encrypted_seed[i]);
-        // debug_decrypt_output(party, 0, context, debug_sk, encrypted_seed[i]);
-        // if(party == 1) std::cerr << "[Party " << party << "] noise budget: " << debug_decryptor.invariant_noise_budget(encrypted_seed[i]) << std::endl;
-    }
-
-    // Ciphertext qwq;
-    // evaluator.multiply(encrypted_seed[0], encrypted_seed[1], qwq);
-    // evaluator.relinearize_inplace(qwq, relin_key_2);
-    // debug_decrypt_output(party, 0, context, debug_sk, encrypted_seed[0]);
-    // debug_decrypt_output(party, 0, context, debug_sk, encrypted_seed[1]);
-    // debug_decrypt_output(party, 0, context, debug_sk, qwq);
     
-    // estimate
-    std::cerr<<"[Party " << party << "] Starting estimation" << std::endl;
-    AESGen aes_gen(0);
-    std::unordered_map<uint64_t, Ciphertext> t_map;
-    std::stack<std::pair<int, Ciphertext>> t_stack_out;
-
-    for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-        std::cerr<<"[Party " << party << "] Round " << now_round << "......" << std::endl;
-        std::vector<Ciphertext> calc_prg_2(get_config().prg_dd);
-        std::stack<std::pair<int, Ciphertext>> t_stack_in;
-        for(auto & item : input_set) {
-            // std::cerr<<"[Party " << party << "] Item " << item << "......" << std::endl;
-            std::vector<int> ids = aes_gen.get_id_group(now_round, item);
-            sort(ids.begin(), ids.end());
-            for(int i = 0; i < get_config().prg_dd; i+=2) {
-                if(i + 1 == get_config().prg_dd) {
-                    calc_prg_2[i] = encrypted_seed[ids[i]];
-                } else {
-                    uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
-                    // if(party == 1) std::cerr<<"[Party " << party << "] Item " << item << " id: " << ids[i] << " and " << ids[i+1] << std::endl;
-                    if(!t_map.count(key)) {
-                        evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i+1]], calc_prg_2[i]);
-                        evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
-                        t_map[key] = calc_prg_2[i];
-                    } else {
-                        calc_prg_2[i] = t_map[key];
-                    }
-                }
-                // debug_decrypt_output(party, now_round, context, debug_sk, calc_prg_2[i]);
-            }
-            for(int w = 2; w < get_config().prg_dd; w <<= 1) {
-                for(int i = 0; i + w < get_config().prg_dd; i += (w<<1)) {
-                    // if(party == 1) std::cerr<<"[Party " << party << "] Item " << item << " Multiply "<< i << " and " << i + w << std::endl;
-                    // debug_decrypt_output(party, now_round, context, debug_sk, calc_prg_2[i]);
-                    // debug_decrypt_output(party, now_round, context, debug_sk, calc_prg_2[i + w]);
-                    evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
-                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
-                    // debug_decrypt_output(party, now_round, context, debug_sk, calc_prg_2[i]);
-                    // if(party == 1) std::cerr<<"[Party " << party << "] noise budget: "<< debug_decryptor.invariant_noise_budget(calc_prg_2[i]) << std::endl;
-                }
-            }
-            // if(party == 1) std::cerr<<"[Party " << party << "] Item " << item << " Insert into stack" << std::endl;
-            // debug_decrypt_output(party, now_round, context, debug_sk, calc_prg_2[0]);
-            auto calc_prg = std::make_pair(1, calc_prg_2[0]);
-            for(auto & id : ids) calc_prg.first *= (batch_seed[id][now_round] == 1 ? 1 : -1);
-            while(!t_stack_in.empty()){
-                auto top = t_stack_in.top();
-                ASSERT_MSG(abs(top.first) >= abs(calc_prg.first), "stack top should be larger than current");
-                if(top.first == calc_prg.first) {
-                    evaluator.add_inplace(calc_prg.second, top.second);
-                    calc_prg.first *= 2;
-                    t_stack_in.pop();
-                } else if(top.first == calc_prg.first * -1) {
-                    evaluator.sub_inplace(calc_prg.second, top.second);
-                    calc_prg.first *= 2;
-                    t_stack_in.pop();
-                } else break;
-            }
-            t_stack_in.push(calc_prg);
-        }
-        auto pm = t_stack_in.top().first;
-        Ciphertext esti_cipher = t_stack_in.top().second;
-        t_stack_in.pop();
-        while(!t_stack_in.empty()) {
-            if(t_stack_in.top().first * pm > 0) {
-                evaluator.add_inplace(esti_cipher, t_stack_in.top().second);
-            } else {
-                evaluator.sub_inplace(esti_cipher, t_stack_in.top().second);
-            }
-            t_stack_in.pop();
-        }
-        std::vector<uint64_t> mask(batch_encoder.slot_count(), 0ull);
-        mask[now_round] = (pm > 0) ? 1 : parms.plain_modulus().value() - 1;
-        Plaintext mask_plain;
-        batch_encoder.encode(mask, mask_plain);
-        evaluator.multiply_plain_inplace(esti_cipher, mask_plain);
-
-        // save and send
-        auto esti_val = std::make_pair(1, esti_cipher);
-        while(!t_stack_out.empty()) {
-            auto top = t_stack_out.top();
-            if(top.first == esti_val.first) {
-                evaluator.add_inplace(esti_val.second, top.second);
-                esti_val.first <<=1;
-                t_stack_out.pop();
-            } else break;
-        }
-        t_stack_out.push(esti_val);
-    }
-    std::cerr<<"[Party " << party << "] prepare to send" << std::endl;
-    Ciphertext esti_cipher = t_stack_out.top().second;
-    t_stack_out.pop();
-    while(!t_stack_out.empty()) {
-        evaluator.add_inplace(esti_cipher, t_stack_out.top().second);
-        t_stack_out.pop();
-    }
-    iosend(party, io, esti_cipher);
-    iorecv(party, io, context, esti_cipher);
-    Plaintext esti_plain;
-    decryptor.decrypt(esti_cipher, esti_plain);
-    std::vector<uint64_t> esti_vec;
-    batch_encoder.decode(esti_plain, esti_vec);
-    std::cerr<<"[Party " << party << "] estimation values: ";
-    for(int now_round = 0; now_round < get_config().mom_tt; ++now_round) std::cerr << esti_vec[now_round] << " ";
-    std::cerr << std::endl;
-
-    if(party == 1) {
-        for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-            io->send_data(&esti_vec[now_round], sizeof(uint64_t));
-        }
-        io->flush();
-        return -1; 
-    } else {
-        std::vector<int64_t> mom;
-        for(int tt = 0, i=0; tt < get_config().mom_tt; ++tt) {
-            int64_t tmp_tot = 0, esti_1, esti_2;
-            for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint64_t esti_val;
-                io->recv_data(&esti_val, sizeof(esti_val));
-                esti_1 = (esti_vec[i] <= parms.plain_modulus().value() / 2 ? esti_vec[i] : esti_vec[i] - parms.plain_modulus().value());
-                esti_2 = (esti_val <= parms.plain_modulus().value() / 2 ? esti_val : esti_val - parms.plain_modulus().value());
-                tmp_tot += esti_1 * esti_2;
-            }
-            mom.push_back(tmp_tot / get_config().mom_kk);
-        }
-        sort(mom.begin(), mom.end());
-        for(const auto& val : mom) {
-            std::cerr << val << " ";
-        }
-        std::cerr << std::endl;
-        return mom[mom.size()/2];
-    }
-}*/
-
-int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set, emp::NetIO* io) {
-    int tot_rounds = get_config().mom_tt * get_config().mom_kk;
-    ASSERT_MSG(tot_rounds <= get_config().seal_degree, "one batch is not enough for #rounds");
+    const GlobalConfig& config = get_config();
+    int tot_rounds = config.mom_tt * config.mom_kk;
+    ASSERT_MSG(tot_rounds <= config.seal_degree, "one batch is not enough for #rounds");
+    
+    // 阶段1: Server生成seed和密钥
+    std::cerr << "[Server" << party << "] Phase 1: Generating seeds and keys" << std::endl;
+    
     EncryptionParameters parms(scheme_type::bfv);
-
-    // set parameters
-    size_t poly_modulus_degree = get_config().seal_degree;
+    size_t poly_modulus_degree = config.seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    // parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
     parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 52, 52, 36, 24, 24 }));
-    /* 
-    时间和层数严格相关，可以做一次乘法自动降一层，但是只能降两层，再降就层数不够用了
-    最后一个不能小于倒数第二个 25往上就没有好处了
-    56, 56, 56, 24, 24 -> 164 139 105 73 41 39
-    52, 52, 36, 24, 24 -> 136 111 76 44 12 7
-    */
-    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, get_config().seal_plain_modulus));
+    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, config.seal_plain_modulus));
 
     SEALContext context(parms);
     print_parameters(context); 
 
-    // generate keys
+    // 生成密钥
     KeyGenerator keygen(context);
     SecretKey secret_key = keygen.secret_key();
-    PublicKey public_key_1;
-    keygen.create_public_key(public_key_1);
+    PublicKey public_key;
+    keygen.create_public_key(public_key);
     RelinKeys relin_key_1, relin_key_2;
     keygen.create_relin_keys(relin_key_1);
 
     BatchEncoder batch_encoder(context);
-    Encryptor encryptor(context, public_key_1);
+    Encryptor encryptor(context, public_key);
     Evaluator evaluator(context);
     Decryptor decryptor(context, secret_key);
 
-    // generate and encrypt seeds
+    // 生成并加密seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
     AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
-    std::vector<std::vector<uint64_t>> batch_seed(get_config().seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
+    std::vector<std::vector<uint64_t>> batch_seed(config.seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
 
     for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-        std::vector<bool> seed = gen_seed.get_bits(now_round, get_config().seed_size);
-        for(int i = 0; i < get_config().seed_size; ++i) {
+        std::vector<bool> seed = gen_seed.get_bits(now_round, config.seed_size);
+        for(int i = 0; i < config.seed_size; ++i) {
             batch_seed[i][now_round] = seed[i] ? parms.plain_modulus().value() - 1 : 1;
         }
     }
 
-    std::vector<Plaintext> plain_seed(get_config().seed_size);
-    std::vector<Ciphertext> encrypted_seed_1(get_config().seed_size), encrypted_seed_2(get_config().seed_size);
-    for(int i = 0; i < get_config().seed_size; ++i) {
+    std::vector<Plaintext> plain_seed(config.seed_size);
+    std::vector<Ciphertext> encrypted_seed_1(config.seed_size), encrypted_seed_2(config.seed_size);
+    for(int i = 0; i < config.seed_size; ++i) {
         batch_encoder.encode(batch_seed[i], plain_seed[i]);
         encryptor.encrypt(plain_seed[i], encrypted_seed_1[i]);
     }
-
-    // send relin key and seeds
-    // SecretKey debug_sk;
-    // iosend(party, io, secret_key);
-    // iorecv(party, io, context, debug_sk);
-    // Decryptor debug_decryptor(context, debug_sk);
-    // std::cerr<<"[Party " << party << "] noise budget: " << decryptor.invariant_noise_budget(encrypted_seed_1[0]) << std::endl;
-
-    std::cerr<<"[Party " << party << "] Sending relin key and seeds" << std::endl;
+    
     if(party == 1) {
-        iosend(party, io, relin_key_1);
-        for(int i = 0; i < get_config().seed_size; ++i) iosend(party, io, encrypted_seed_1[i]);
-        io->flush();
-        iorecv(party, io, context, relin_key_2);
-        for(int i = 0; i < get_config().seed_size; ++i) iorecv(party, io, context, encrypted_seed_2[i]);
+        iosend(party, server_io, relin_key_1);
+        for(int i = 0; i < config.seed_size; ++i) iosend(party, server_io, encrypted_seed_1[i]);
+        server_io->flush();
+        iorecv(party, server_io, context, relin_key_2);
+        for(int i = 0; i < config.seed_size; ++i) iorecv(party, server_io, context, encrypted_seed_2[i]);
     } else {
-        iorecv(party, io, context, relin_key_2);
-        for(int i = 0; i < get_config().seed_size; ++i) iorecv(party, io, context, encrypted_seed_2[i]);
-        iosend(party, io, relin_key_1);
-        for(int i = 0; i < get_config().seed_size; ++i) iosend(party, io, encrypted_seed_1[i]);
-        io->flush();
+        iorecv(party, server_io, context, relin_key_2);
+        for(int i = 0; i < config.seed_size; ++i) iorecv(party, server_io, context, encrypted_seed_2[i]);
+        iosend(party, server_io, relin_key_1);
+        for(int i = 0; i < config.seed_size; ++i) iosend(party, server_io, encrypted_seed_1[i]);
+        server_io->flush();
     }
-    for(int i = 0; i < get_config().seed_size; ++i) {
+    for(int i = 0; i < config.seed_size; ++i) {
         evaluator.multiply_plain_inplace(encrypted_seed_2[i], plain_seed[i]);
-        // evaluator.relinearize_inplace(encrypted_seed_2[i], relin_key_2);
         evaluator.mod_switch_to_next_inplace(encrypted_seed_2[i]);
     }
-    // std::cerr<<"[Party " << party << "] noise budget after multiply: " << debug_decryptor.invariant_noise_budget(encrypted_seed_2[0]) << std::endl;
 
-    // estimate
-    std::cerr<<"[Party " << party << "] Starting estimation" << std::endl;
-    AESGen aes_gen(0);
-    std::unordered_map<uint64_t, Ciphertext> t_map;
-    std::stack<std::pair<int, Ciphertext>> t_stack_in;
-    std::vector<Ciphertext> calc_prg_2(get_config().prg_dd);
+    // 阶段2: 等待client处理完成
+    for(auto & client_io : client_connections) {
+        iosend(party, client_io, relin_key_2);
+        for(int i = 0; i < config.seed_size; ++i) iosend(party, client_io, encrypted_seed_2[i]);
+        client_io->flush();
+    }
+    std::cerr << "[Server" << party << "] Phase 2: Waiting for client processing" << std::endl;
     
-    for(auto & item : input_set) {
-        std::vector<int> ids = aes_gen.get_id_group(0, item);
-        sort(ids.begin(), ids.end());
-        for(int i = 0; i < get_config().prg_dd; i+=2) {
-            if(i + 1 == get_config().prg_dd) {
-                calc_prg_2[i] = encrypted_seed_2[ids[i]];
-                evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
-            } else {
-                uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
-                if(!t_map.count(key)) {
-                    evaluator.multiply(encrypted_seed_2[ids[i]], encrypted_seed_2[ids[i+1]], calc_prg_2[i]);
-                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
-                    evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
-                    t_map[key] = calc_prg_2[i];
-                    // if(t_stack_in.empty() && i == 0) {
-                    //     std::cerr<<"[Party " << party << "] noise budget after first multiply: " 
-                    //         << debug_decryptor.invariant_noise_budget(calc_prg_2[i]) << std::endl;
-                    // }
-                } else {
-                    calc_prg_2[i] = t_map[key];
-                }
-            }
-        }
-        for(int w = 2; w < get_config().prg_dd; w <<= 1) {
-            for(int i = 0; i < get_config().prg_dd; i += (w<<1)) {
-                if(i + w < get_config().prg_dd) {
-                    evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
-                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
-                }
-                // if(w == 2) evaluator.mod_switch_to_next_inplace(calc_prg_2[i]);
-                // if(t_stack_in.empty() && i == 0) {
-                //     std::cerr<<"[Party " << party << "] noise budget after multiply: " 
-                //         << debug_decryptor.invariant_noise_budget(calc_prg_2[i]) << std::endl;
-                // }
-            }
-        }
-        auto calc_prg = std::make_pair(1, calc_prg_2[0]);
-        while(!t_stack_in.empty()){
-            auto top = t_stack_in.top();
-            ASSERT_MSG(abs(top.first) >= abs(calc_prg.first), "stack top should be larger than current");
-            if(top.first == calc_prg.first) {
-                evaluator.add_inplace(calc_prg.second, top.second);
-                calc_prg.first <<= 1;
-                t_stack_in.pop();
+    // 接收来自clients的处理结果
+    std::stack<std::pair<int, Ciphertext>> t_stack;
+    for(auto & client_io : client_connections) {
+        Ciphertext client_result;
+        iorecv(party, client_io, context, client_result);
+        auto tmp = std::make_pair(1, client_result);
+        while(!t_stack.empty()){
+            auto top = t_stack.top();
+            ASSERT_MSG(abs(top.first) >= abs(tmp.first), "stack top should be larger than current");
+            if(top.first == tmp.first) {
+                evaluator.add_inplace(tmp.second, top.second);
+                tmp.first <<= 1;
+                t_stack.pop();
             } else break;
         }
-        t_stack_in.push(calc_prg);
+        t_stack.push(tmp);
     }
-    Ciphertext esti_cipher_1 = t_stack_in.top().second, esti_cipher_2;
-    t_stack_in.pop();
-    while(!t_stack_in.empty()) {
-        evaluator.add_inplace(esti_cipher_1, t_stack_in.top().second);
-        t_stack_in.pop();
+    Ciphertext combined_result = t_stack.top().second;
+    t_stack.pop();
+    while(!t_stack.empty()) {
+        evaluator.add_inplace(combined_result, t_stack.top().second);
+        t_stack.pop();
     }
-    // std::cerr<<"[Party " << party << "] noise budget before sharing: " 
-    //     << debug_decryptor.invariant_noise_budget(esti_cipher_1) << std::endl;
 
-    // sharing & multiply
+    // 阶段3: Server进行secret sharing和MPC计算
+    std::cerr << "[Server" << party << "] Phase 3: Secret sharing and MPC computation" << std::endl;
+
+    // 与其他server进行secret sharing
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
     for(int i = 0; i < tot_rounds; ++i) {
         rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
     }
     Plaintext rnd_1_plain, rnd_2_plain;
     batch_encoder.encode(rnd_1, rnd_1_plain);
-    evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
+    evaluator.sub_plain_inplace(combined_result, rnd_1_plain);
+    
+    Ciphertext esti_cipher_1, esti_cipher_2;
     if(party == 1) {
-        iosend(party, io, esti_cipher_1);
-        io->flush();
-        iorecv(party, io, context, esti_cipher_2);
+        iosend(party, server_io, combined_result);
+        server_io->flush();
+        iorecv(party, server_io, context, esti_cipher_2);
     } else {
-        iorecv(party, io, context, esti_cipher_2);
-        iosend(party, io, esti_cipher_1);
-        io->flush();
+        iorecv(party, server_io, context, esti_cipher_2);
+        iosend(party, server_io, combined_result);
+        server_io->flush();
     }
-    std::cerr<<"[Party " << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
+    
+    std::cerr<<"[Server" << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
     batch_encoder.decode(rnd_2_plain, rnd_2);
 
+    // MPC计算
     if(party == 1) {
-        iorecv(party, io, context, esti_cipher_1);
-        iorecv(party, io, context, esti_cipher_2);
+        iorecv(party, server_io, context, esti_cipher_1);
+        iorecv(party, server_io, context, esti_cipher_2);
         evaluator.add_plain_inplace(esti_cipher_1, rnd_1_plain);
         evaluator.add_plain_inplace(esti_cipher_2, rnd_2_plain);
         evaluator.multiply_inplace(esti_cipher_1, esti_cipher_2);
@@ -561,26 +227,24 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
         }
         batch_encoder.encode(rnd_1, rnd_1_plain);
         evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
-        iosend(party, io, esti_cipher_1);
-        io->flush();
-    }
-    else{
+        iosend(party, server_io, esti_cipher_1);
+        server_io->flush();
+    } else {
         encryptor.encrypt(rnd_1_plain, esti_cipher_1);
         encryptor.encrypt(rnd_2_plain, esti_cipher_2);
         evaluator.mod_switch_to_next_inplace(esti_cipher_1);
         evaluator.mod_switch_to_next_inplace(esti_cipher_2);
         evaluator.mod_switch_to_next_inplace(esti_cipher_1);
         evaluator.mod_switch_to_next_inplace(esti_cipher_2);
-        iosend(party, io, esti_cipher_2);
-        iosend(party, io, esti_cipher_1);
-        io->flush();
-        iorecv(party, io, context, esti_cipher_2);
+        iosend(party, server_io, esti_cipher_2);
+        iosend(party, server_io, esti_cipher_1);
+        server_io->flush();
+        iorecv(party, server_io, context, esti_cipher_2);
         decryptor.decrypt(esti_cipher_2, rnd_2_plain);
         batch_encoder.decode(rnd_2_plain, rnd_2);
     }
 
-    // mpc - median of means
-	setup_semi_honest(io, party);
+    setup_semi_honest(server_io, party);
     int mpcbitlen = 32;
     Integer *esti_1 = new Integer[get_config().mom_tt], *esti_2 = new Integer[get_config().mom_tt], 
         *esti_sum = new Integer[get_config().mom_tt];
@@ -606,218 +270,324 @@ int psi_ca_prg_nondeter_He_simd_mpc(int party, const std::vector<int>& input_set
     delete[] esti_1, esti_2, esti_sum;
     finalize_semi_honest();
     return psi_ca / get_config().mom_kk;
-
-    /*// send back (mpc begins)
-    std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
-    for(int i = 0; i < tot_rounds; ++i) {
-        rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
-    }
-    Plaintext rnd_1_plain, rnd_2_plain;
-    batch_encoder.encode(rnd_1, rnd_1_plain);
-    evaluator.sub_plain_inplace(esti_cipher_1, rnd_1_plain);
-    if(party == 1) {
-        iosend(party, io, esti_cipher_1);
-        iorecv(party, io, context, esti_cipher_2);
-    } else {
-        iorecv(party, io, context, esti_cipher_2);
-        iosend(party, io, esti_cipher_1);
-    }
-    std::cerr<<"[Party " << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
-    decryptor.decrypt(esti_cipher_2, rnd_2_plain);
-    batch_encoder.decode(rnd_2_plain, rnd_2);
-
-    // prepare input sharing
-    std::cerr<<"[Party " << party << "] input sharing" << std::endl;
-	setup_semi_honest(io, party);
-    int mpcbitlen = 42;
-    std::vector<std::vector<std::vector<Integer>>> esti_1(2, std::vector<std::vector<Integer>>(get_config().mom_tt, std::vector<Integer>(get_config().mom_kk)));
-    std::vector<std::vector<std::vector<Integer>>> esti_2(2, std::vector<std::vector<Integer>>(get_config().mom_tt, std::vector<Integer>(get_config().mom_kk)));
-    for(int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-        for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-            esti_1[party-1][tt][kk] = Integer(mpcbitlen, rnd_1[i], party);
-            esti_2[2-party][tt][kk] = Integer(mpcbitlen, rnd_2[i], party);
-            esti_1[2-party][tt][kk] = Integer(mpcbitlen, 0, 3-party);
-            esti_2[party-1][tt][kk] = Integer(mpcbitlen, 0, 3-party);
-        }
-    }
-
-    // compute median of means
-    std::cerr<<"[Party " << party << "] begin compute" << std::endl;
-    Integer modp(mpcbitlen, parms.plain_modulus().value(), PUBLIC), mod23p(mpcbitlen, parms.plain_modulus().value()*2/3, PUBLIC);
-	Integer *esti_sum = new Integer[get_config().mom_tt];
-    for(int tt = 0; tt < get_config().mom_tt; ++tt) {
-        esti_sum[tt] = Integer(mpcbitlen, 0, PUBLIC);
-        for(int kk = 0; kk < get_config().mom_kk; ++kk) {
-            Integer esti_x = mod_add(esti_1[0][tt][kk], esti_2[0][tt][kk], modp);
-            Integer esti_y = mod_add(esti_1[1][tt][kk], esti_2[1][tt][kk], modp);
-            esti_sum[tt] = mod_add(esti_sum[tt], mod_mul(esti_x, esti_y, modp), modp);
-        }
-        Bit over = esti_sum[tt] >= mod23p;
-        esti_sum[tt] = If(over, esti_sum[tt] - modp, esti_sum[tt]);
-    }
-    sort(esti_sum, get_config().mom_tt);
-    int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<uint64_t>(PUBLIC);
-    delete[] esti_sum;
-    finalize_semi_honest();
-    return psi_ca / get_config().mom_kk;*/
 }
 
-/*int psi_ca_prg_nondeter_He_simd(int party, const std::vector<int>& input_set, emp::NetIO* io) {
-    int tot_rounds = get_config().mom_tt * get_config().mom_kk;
-    ASSERT_MSG(tot_rounds <= get_config().seal_degree, "one batch is not enough for #rounds");
-    EncryptionParameters parms(scheme_type::bfv);
+int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+    if(get_config().test_mode) {
+        uint64_t prg_seed;
+        io->recv_data(&prg_seed, sizeof(prg_seed));
+        get_config().prg_seed = prg_seed;
+    }
 
-    // set parameters
-    size_t poly_modulus_degree = get_config().seal_degree;
+    const GlobalConfig& config = get_config();
+    int party = config.party;
+    int tot_rounds = config.mom_tt * config.mom_kk;
+    
+    std::cerr << "[Client" << config.party << "] Phase 2: Processing input set" << std::endl;
+    
+    // 接收来自server的密钥和seeds
+    EncryptionParameters parms(scheme_type::bfv);
+    size_t poly_modulus_degree = config.seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
-    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, get_config().seal_plain_modulus));
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 52, 52, 36, 24, 24 }));
+    parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, config.seal_plain_modulus));
 
     SEALContext context(parms);
-    print_parameters(context); 
-
-    // generate keys
-    KeyGenerator keygen(context);
-    SecretKey secret_key = keygen.secret_key();
-    PublicKey public_key_1, public_key_2;
-    keygen.create_public_key(public_key_1);
-    RelinKeys relin_key_1, relin_key_2;
-    keygen.create_relin_keys(relin_key_1);
-
     BatchEncoder batch_encoder(context);
-    Encryptor encryptor(context, public_key_1);
     Evaluator evaluator(context);
-    Decryptor decryptor(context, secret_key);
-
-    // send public key, relin key
-    iosend(party, io, public_key_1);
-    iosend(party, io, relin_key_1);
-    iorecv(party, io, context, public_key_2);
-    iorecv(party, io, context, relin_key_2);
-
-    // encrypt and send seeds
-    std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
-    AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
-    std::vector<std::vector<uint64_t>> batch_seed(get_config().seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
-
-    for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-        std::vector<bool> seed = gen_seed.get_bits(now_round, get_config().seed_size);
-        for(int i = 0; i < get_config().seed_size; ++i) {
-            batch_seed[i][now_round] = seed[i] ? parms.plain_modulus().value() - 1 : 1;
-        }
-    }
-
-    std::vector<Plaintext> plain_seed(get_config().seed_size);
-    std::vector<Ciphertext> encrypted_seed(get_config().seed_size);
-    for(int i = 0; i < get_config().seed_size; ++i) {
-        batch_encoder.encode(batch_seed[i], plain_seed[i]);
-        encryptor.encrypt(plain_seed[i], encrypted_seed[i]);
-        iosend(party, io, encrypted_seed[i]);
+    
+    RelinKeys relin_key;
+    std::vector<Ciphertext> encrypted_seed(config.seed_size);
+    
+    // 从对应的server接收密钥和seeds
+    iorecv(party, io, context, relin_key);
+    for(int i = 0; i < config.seed_size; ++i) {
         iorecv(party, io, context, encrypted_seed[i]);
-        // 一起发
-        evaluator.multiply_plain_inplace(encrypted_seed[i], plain_seed[i]);
     }
-
-    // estimate
-    auto t_start = std::chrono::high_resolution_clock::now();
-    std::cerr<<"[Party " << party << "] Starting estimation" << std::endl;
+    
+    // 处理输入集合
     AESGen aes_gen(0);
     std::unordered_map<uint64_t, Ciphertext> t_map;
     std::stack<std::pair<int, Ciphertext>> t_stack_in;
-    std::vector<Ciphertext> calc_prg_2(get_config().prg_dd);
-
+    std::vector<Ciphertext> calc_prg(config.prg_dd);
+    
     for(auto & item : input_set) {
         std::vector<int> ids = aes_gen.get_id_group(0, item);
         sort(ids.begin(), ids.end());
-        for(int i = 0; i < get_config().prg_dd; i+=2) {
-            if(i + 1 == get_config().prg_dd) {
-                calc_prg_2[i] = encrypted_seed[ids[i]];
+        for(int i = 0; i < config.prg_dd; i+=2) {
+            if(i + 1 == config.prg_dd) {
+                calc_prg[i] = encrypted_seed[ids[i]];
+                evaluator.mod_switch_to_next_inplace(calc_prg[i]);
             } else {
                 uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
                 if(!t_map.count(key)) {
-                    // t_start = std::chrono::high_resolution_clock::now();
-                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i+1]], calc_prg_2[i]);
-                    evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2); // 省掉 
-                    // std::cout << "time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t_start).count() << " ms" << std::endl;
-                    t_map[key] = calc_prg_2[i];
+                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i+1]], calc_prg[i]);
+                    evaluator.relinearize_inplace(calc_prg[i], relin_key);
+                    evaluator.mod_switch_to_next_inplace(calc_prg[i]);
+                    t_map[key] = calc_prg[i];
                 } else {
-                    calc_prg_2[i] = t_map[key];
+                    calc_prg[i] = t_map[key];
                 }
             }
         }
-        for(int w = 2; w < get_config().prg_dd; w <<= 1) {
-            for(int i = 0; i + w < get_config().prg_dd; i += (w<<1)) {
-                evaluator.multiply_inplace(calc_prg_2[i], calc_prg_2[i + w]);
-                evaluator.relinearize_inplace(calc_prg_2[i], relin_key_2);
+        for(int w = 2; w < config.prg_dd; w <<= 1) {
+            for(int i = 0; i < config.prg_dd; i += (w<<1)) {
+                if(i + w < config.prg_dd) {
+                    evaluator.multiply_inplace(calc_prg[i], calc_prg[i + w]);
+                    evaluator.relinearize_inplace(calc_prg[i], relin_key);
+                }
             }
         }
-        auto calc_prg = std::make_pair(1, calc_prg_2[0]);
+        auto sum_prg = std::make_pair(1, calc_prg[0]);
         while(!t_stack_in.empty()){
             auto top = t_stack_in.top();
-            ASSERT_MSG(abs(top.first) >= abs(calc_prg.first), "stack top should be larger than current");
-            if(top.first == calc_prg.first) {
-                evaluator.add_inplace(calc_prg.second, top.second);
-                calc_prg.first <<= 1;
+            ASSERT_MSG(abs(top.first) >= abs(sum_prg.first), "stack top should be larger than current");
+            if(top.first == sum_prg.first) {
+                evaluator.add_inplace(sum_prg.second, top.second);
+                sum_prg.first <<= 1;
                 t_stack_in.pop();
             } else break;
         }
-        t_stack_in.push(calc_prg);
+        t_stack_in.push(sum_prg);
     }
+    
     Ciphertext esti_cipher = t_stack_in.top().second;
     t_stack_in.pop();
     while(!t_stack_in.empty()) {
         evaluator.add_inplace(esti_cipher, t_stack_in.top().second);
         t_stack_in.pop();
     }
-
-    // send back
+    
+    // 发送结果给对应的server
     iosend(party, io, esti_cipher);
-    iorecv(party, io, context, esti_cipher);
-    Plaintext esti_plain;
-    decryptor.decrypt(esti_cipher, esti_plain);
-    std::cout << "noise budget: " << decryptor.invariant_noise_budget(esti_cipher) << std::endl;
-    std::vector<uint64_t> esti_vec;
-    batch_encoder.decode(esti_plain, esti_vec);
-    std::cerr<<"[Party " << party << "] estimation values: ";
-    for(int now_round = 0; now_round < get_config().mom_tt; ++now_round) std::cerr << esti_vec[now_round] << " ";
-    std::cerr << std::endl;
-
-    if(party == 1) {
-        for(int now_round = 0; now_round < tot_rounds; ++now_round) {
-            io->send_data(&esti_vec[now_round], sizeof(uint64_t));
-        }
-        io->flush();
-        return -1; 
-    } else {
-        std::vector<int64_t> mom;
-        for(int tt = 0, i=0; tt < get_config().mom_tt; ++tt) {
-            int64_t tmp_tot = 0, esti_1, esti_2;
-            for(int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint64_t esti_val;
-                io->recv_data(&esti_val, sizeof(esti_val));
-                esti_1 = (esti_vec[i] <= parms.plain_modulus().value() / 2 ? esti_vec[i] : esti_vec[i] - parms.plain_modulus().value());
-                esti_2 = (esti_val <= parms.plain_modulus().value() / 2 ? esti_val : esti_val - parms.plain_modulus().value());
-                tmp_tot += esti_1 * esti_2;
-            }
-            mom.push_back(tmp_tot / get_config().mom_kk);
-        }
-        sort(mom.begin(), mom.end());
-        for(const auto& val : mom) {
-            std::cerr << val << " ";
-        }
-        std::cerr << std::endl;
-        return mom[mom.size()/2];
-    }
-}*/
+    io->flush();
+    
+    std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
+    return -1; // Client不返回PSI大小
+}
 
 // -----------------------------------------------------------
+// Naive PSI Implementation (Plaintext Version)
+// -----------------------------------------------------------
 
-struct _AutoRegister {
-    _AutoRegister() {
-        register_psi_method("naive", psi_ca_naive);
-        register_psi_method("prg_nondeter_naive", psi_ca_prg_nondeter_naive);
-        // register_psi_method("prg_nondeter_He", psi_ca_prg_nondeter_He);
-        // register_psi_method("prg_nondeter_He_simd", psi_ca_prg_nondeter_He_simd);
-        register_psi_method("prg_nondeter_He_simd_mpc", psi_ca_prg_nondeter_He_simd_mpc);
+int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+    if(get_config().test_mode) {
+        uint64_t prg_seed = get_config().prg_seed;
+        if(party == 1) {
+            server_io->send_data(&prg_seed, sizeof(prg_seed));
+            server_io->flush();
+        } else {
+            server_io->recv_data(&prg_seed, sizeof(prg_seed));
+        }
+        for(auto & client_io : client_connections) {
+            client_io->send_data(&prg_seed, sizeof(prg_seed));
+            client_io->flush();
+        }
+        get_config().prg_seed = prg_seed;
     }
-} _auto_register;
+
+    const GlobalConfig& config = get_config();
+    int tot_rounds = config.mom_tt * config.mom_kk;
+    
+    std::cerr << "[Server" << party << "] Naive PSI: Phase 1 - Generating seeds" << std::endl;
+    
+    // 阶段1: 生成明文seeds
+    std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
+    AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
+    std::vector<std::vector<uint8_t>> seeds(config.seed_size);
+    
+    for(int round = 0; round < tot_rounds; ++round) {
+        std::vector<bool> seed = gen_seed.get_bits(round, config.seed_size);
+        for(int i = 0; i < config.seed_size; ++i) {
+            seeds[i].push_back(seed[i] ? 1 : 0);
+        }
+    }
+    
+    // 与其他server交换seeds
+    std::vector<std::vector<uint8_t>> seeds_other(config.seed_size, std::vector<uint8_t>(tot_rounds, 0));
+    if(party == 1) {
+        for(int i = 0; i < config.seed_size; ++i) {
+            for(int j = 0; j < tot_rounds; ++j) {
+                server_io->send_data(&seeds[i][j], sizeof(uint8_t));
+            }
+        }
+        server_io->flush();
+        for(int i = 0; i < config.seed_size; ++i) {
+            for(int j = 0; j < tot_rounds; ++j) {
+                server_io->recv_data(&seeds_other[i][j], sizeof(uint8_t));
+            }
+        }
+    } else {
+        for(int i = 0; i < config.seed_size; ++i) {
+            for(int j = 0; j < tot_rounds; ++j) {
+                server_io->recv_data(&seeds_other[i][j], sizeof(uint8_t));
+            }
+        }
+        for(int i = 0; i < config.seed_size; ++i) {
+            for(int j = 0; j < tot_rounds; ++j) {
+                server_io->send_data(&seeds[i][j], sizeof(uint8_t));
+            }
+        }
+        server_io->flush();
+    }
+    
+    // 计算组合seeds
+    std::vector<std::vector<uint8_t>> combined_seeds(config.seed_size);
+    for(int i = 0; i < config.seed_size; ++i) {
+        for(int j = 0; j < tot_rounds; ++j) 
+            combined_seeds[i].push_back(seeds[i][j] ^ seeds_other[i][j]);
+    }
+    
+    // 阶段2: 发送seeds给clients
+    std::cerr << "[Server" << party << "] Naive PSI: Phase 2 - Sending seeds to clients" << std::endl;
+    for(auto& client_io : client_connections) {
+        for(int i = 0; i < config.seed_size; ++i) {
+            for(int j = 0; j < tot_rounds; ++j) {
+                client_io->send_data(&combined_seeds[i][j], sizeof(uint8_t));
+            }
+        }
+        client_io->flush();
+    }
+    
+    // 阶段3: 接收clients的处理结果
+    std::cerr << "[Server" << party << "] Naive PSI: Phase 3 - Receiving client results" << std::endl;
+    std::vector<int64_t> combined_result(tot_rounds, 0);
+    for(auto& client_io : client_connections) {
+        for(int i = 0; i < tot_rounds; ++i) {
+            int64_t tmp;
+            client_io->recv_data(&tmp, sizeof(int64_t));
+            combined_result[i] += tmp;
+        }
+    }
+    
+    // 阶段4: 计算最终结果
+    std::cerr << "[Server" << party << "] Naive PSI: Phase 4 - Computing final result" << std::endl;
+
+    if(party == 1) {
+        for(int i = 0; i < tot_rounds; ++i) {
+            server_io->send_data(&combined_result[i], sizeof(int64_t));
+        }
+        server_io->flush();
+        return -1;
+    } else {
+        std::vector<int64_t> result, means;
+        for(int i = 0; i < tot_rounds; ++i) {
+            int64_t tmp;
+            server_io->recv_data(&tmp, sizeof(int64_t));
+            result.push_back(tmp);
+        }
+        for(int i = 0; i < tot_rounds; ++i) combined_result[i] *= result[i];
+        for(int tt = 0, i = 0; tt < config.mom_tt; ++tt) {
+            uint64_t sum = 0;
+            for(int kk = 0; kk < config.mom_kk; ++kk, ++i) {
+                sum += combined_result[i];
+            }
+            means.push_back(sum / config.mom_kk);
+        }
+        sort(means.begin(), means.end());
+        return means[config.mom_tt / 2];
+    }
+}
+
+int psi_client_naive(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+    if(get_config().test_mode) {
+        uint64_t prg_seed;
+        io->recv_data(&prg_seed, sizeof(prg_seed));
+        get_config().prg_seed = prg_seed;
+    }
+
+    const GlobalConfig& config = get_config();
+    int tot_rounds = config.mom_tt * config.mom_kk;
+    
+    std::cerr << "[Client" << client_id << "] Naive PSI: Processing input set" << std::endl;
+    
+    // 接收来自server的seeds
+    std::vector<std::vector<uint8_t>> seeds(config.seed_size, std::vector<uint8_t>(tot_rounds, 0));
+    for(int i = 0; i < config.seed_size; ++i) {
+        for(int j = 0; j < tot_rounds; ++j) {
+            io->recv_data(&seeds[i][j], sizeof(uint8_t));
+        }
+    }
+    
+    // 处理输入集合
+    AESGen aes_gen(0);
+    std::vector<int64_t> result(tot_rounds, 0);
+
+    for(const auto& item : input_set) {
+        std::vector<int> ids = aes_gen.get_id_group(0, item);
+        sort(ids.begin(), ids.end());
+        // 为每个round计算贡献
+        for(int round = 0; round < tot_rounds; ++round) {
+            uint8_t contribution = 0;
+            for(int i = 0; i < config.prg_dd; i++) {
+                contribution ^= seeds[ids[i]][round];
+            }
+            result[round] += contribution ? -1 : 1;
+        }
+    }
+    
+    // 发送结果给server
+    for(int i = 0; i < tot_rounds; ++i) {
+        io->send_data(&result[i], sizeof(int64_t));
+    }
+    io->flush();
+    
+    std::cerr << "[Client" << client_id << "] Naive PSI: Processing completed" << std::endl;
+    return -1; // Client不返回PSI大小
+}
+
+// -----------------------------------------------------------
+// Registration Mechanism
+// -----------------------------------------------------------
+
+// 函数指针类型定义
+using PsiServerFunc = int(*)(int, emp::NetIO*, std::vector<emp::NetIO*>&);
+using PsiClientFunc = int(*)(int, int, const std::vector<int>&, emp::NetIO*);
+
+// 注册表
+static std::unordered_map<std::string, PsiServerFunc> server_registry;
+static std::unordered_map<std::string, PsiClientFunc> client_registry;
+
+// 注册函数
+void register_psi_server(const std::string& name, PsiServerFunc func) {
+    server_registry[name] = func;
+}
+
+void register_psi_client(const std::string& name, PsiClientFunc func) {
+    client_registry[name] = func;
+}
+
+// 主函数 - 使用注册机制
+int psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+    const GlobalConfig& config = get_config();
+    std::string mode = config.psi_mode;
+    
+    if (!server_registry.count(mode)) {
+        throw std::runtime_error("Unregistered psi_mode for server: " + mode);
+    }
+    
+    return server_registry[mode](party, server_io, client_connections);
+}
+
+int psi_client(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+    const GlobalConfig& config = get_config();
+    std::string mode = config.psi_mode;
+    
+    if (!client_registry.count(mode)) {
+        throw std::runtime_error("Unregistered psi_mode for client: " + mode);
+    }
+    
+    return client_registry[mode](client_id, server_id, input_set, io);
+}
+
+// 静态注册
+static bool register_functions() {
+    register_psi_server("naive", psi_server_naive);
+    register_psi_server("fhe", psi_server_fhe);
+    register_psi_client("naive", psi_client_naive);
+    register_psi_client("fhe", psi_client_fhe);
+    return true;
+}
+
+// 静态变量确保注册在程序启动时执行
+static bool registered = register_functions();
