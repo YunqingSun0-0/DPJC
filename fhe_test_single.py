@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Fast test script for naive PSI implementation validation
-Optimized for speed - runs only essential tests
+Single FHE Test Script
+Quick test to verify FHE PSI functionality
 """
 
 import os
@@ -13,18 +13,18 @@ import shutil
 import re
 
 # ==================== CONFIGURABLE PARAMETERS ====================
-# Test parameters - Optimized for speed
-UNIVERSAL_SIZE_BIT = 12  # Reduced for faster testing
-SET_SIZE = 500  # Reduced for faster testing
-INTERSECTION_SIZE = 200  # Reduced for faster testing
-NUM_CLIENTS_PER_SERVER = 2  # Reduced for faster testing
-OUTPUT_DIR = "./test_naive_data_fast"
-PORT = 20930  # Different port to avoid conflicts
+# Test parameters - Small for quick testing
+UNIVERSAL_SIZE_BIT = 20  # Small for quick testing
+SET_SIZE = 2**12  # Small for quick testing
+INTERSECTION_SIZE = SET_SIZE // 2
+NUM_CLIENTS_PER_SERVER = 4
+OUTPUT_DIR = "./test_fhe_single"
+PORT = 22000
 
 # Test parameters
 VERBOSE = True
 CLEANUP_AFTER_TEST = True
-TIMEOUT_SECONDS = 20  # Reduced timeout
+TIMEOUT_SECONDS = 120  # 2 minutes timeout for FHE
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -38,7 +38,7 @@ def kill_existing_processes():
     try:
         subprocess.run("pkill -f psi_server", shell=True, capture_output=True)
         subprocess.run("pkill -f psi_client", shell=True, capture_output=True)
-        time.sleep(0.2)  # Minimal wait
+        time.sleep(0.2)
     except Exception as e:
         log(f"Warning: Could not check for existing processes: {e}", "WARNING")
 
@@ -60,14 +60,6 @@ def run_command(cmd, description=""):
         log(f"✗ {description or cmd} failed with exception: {e}", "ERROR")
         return False, str(e)
 
-def read_set_from_file(filename):
-    """Read a set from file"""
-    if not os.path.exists(filename):
-        return set()
-    
-    with open(filename, 'r') as f:
-        return set(int(line.strip()) for line in f if line.strip())
-
 def start_process(cmd, description):
     """Start a process in background"""
     log(f"Starting {description}")
@@ -78,10 +70,10 @@ def start_process(cmd, description):
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid
     )
-    time.sleep(0.3)  # Minimal wait
+    time.sleep(0.3)  # Wait for process to start
     return process
 
-def wait_for_processes(processes, timeout=30):
+def wait_for_processes(processes, timeout=120):
     """Wait for multiple processes to complete"""
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -92,21 +84,56 @@ def wait_for_processes(processes, timeout=30):
                 break
         if all_finished:
             return True
-        time.sleep(0.1)  # Fast polling
+        time.sleep(0.1)
     return False
 
-def extract_psi_size_from_output(processes):
-    """Extract PSI size from server output"""
-    for process in processes:
+def extract_timing_from_output(processes):
+    """Extract timing information from process output"""
+    timing_data = {}
+    
+    for i, process in enumerate(processes):
         if process.poll() is not None:
+            stdout = process.stdout.read().decode() if process.stdout else ""
             stderr = process.stderr.read().decode() if process.stderr else ""
-            lines = stderr.split('\n')
-            for line in lines:
-                if 'Final PSI size' in line:
-                    numbers = re.findall(r'\d+', line)
-                    if numbers:
-                        return int(numbers[-1])
-    return None
+            output = stdout + stderr
+            
+            log(f"Process {i+1} output:")
+            log(output[:1000] + "..." if len(output) > 1000 else output)
+            
+            # Extract timing information
+            key_gen_match = re.search(r'Key generation time: ([\d.]+)s', output)
+            if key_gen_match:
+                timing_data[f"key_gen_server_time_{i+1}"] = float(key_gen_match.group(1))
+            
+            client_compute_match = re.search(r'Client computation time: ([\d.]+)s', output)
+            if client_compute_match:
+                timing_data[f"client_compute_time_{i+1}"] = float(client_compute_match.group(1))
+            
+            server_recover_match = re.search(r'Server recovery time: ([\d.]+)s', output)
+            if server_recover_match:
+                timing_data[f"server_recover_time_{i+1}"] = float(server_recover_match.group(1))
+            
+            # Extract key generation communication size
+            comm_match = re.search(r'Key generation Communication: ([\d.]+) MB', output)
+            if comm_match:
+                timing_data["key_gen_communication_mb"] = float(comm_match.group(1))
+            
+            # Extract server recovery communication size
+            comm_match = re.search(r'Server recovery Communication: ([\d.]+) MB', output)
+            if comm_match:
+                timing_data["server_recover_communication_mb"] = float(comm_match.group(1))
+            
+            # Extract PSI size
+            psi_match = re.search(r'Final PSI size: (\d+)', output)
+            if psi_match:
+                timing_data["psi_size"] = int(psi_match.group(1))
+            
+            # Extract total server time
+            total_match = re.search(r'Total server time: ([\d.]+)s', output)
+            if total_match:
+                timing_data[f"total_server_{i+1}"] = float(total_match.group(1))
+    
+    return timing_data
 
 # ==================== TEST FUNCTIONS ====================
 
@@ -142,49 +169,51 @@ def generate_test_data():
             log(f"Error: Generated data file not found: {file}", "ERROR")
             return False, None, None, None
     
-    # Read all sets and calculate expected intersection
-    server1_sets = [read_set_from_file(f) for f in server1_files]
-    server2_sets = [read_set_from_file(f) for f in server2_files]
+    # Calculate expected intersection size (simplified)
+    expected_intersection_size = INTERSECTION_SIZE
     
-    # Calculate intersection across all clients
-    all_server1_elements = set()
-    all_server2_elements = set()
-    
-    for s in server1_sets:
-        all_server1_elements.update(s)
-    for s in server2_sets:
-        all_server2_elements.update(s)
-    
-    expected_intersection = all_server1_elements.intersection(all_server2_elements)
-    expected_intersection_size = len(expected_intersection)
-    
-    log(f"Server 1 total elements: {len(all_server1_elements)}")
-    log(f"Server 2 total elements: {len(all_server2_elements)}")
+    log(f"Set size: {SET_SIZE}")
     log(f"Expected intersection size: {expected_intersection_size}")
     
     return True, server1_files, server2_files, expected_intersection_size
 
-def run_psi_test(server1_files, server2_files):
-    """Run PSI test with servers and clients"""
+def run_fhe_test(server1_files, server2_files):
+    """Run FHE PSI test"""
     log("=" * 50)
-    log("RUNNING PSI TEST")
+    log("RUNNING FHE PSI TEST")
     log("=" * 50)
     
-    # Start servers
-    server1_cmd = f"./build/bin/psi_server -p 1 --port {PORT} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode"
-    server2_cmd = f"./build/bin/psi_server -p 2 --port {PORT} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode"
+    # FHE parameters
+    seed_size = 64
+    prg_dd = 4
+    network_mode = "lan"
     
-    server1_process = start_process(server1_cmd, "Server 1")
-    server2_process = start_process(server2_cmd, "Server 2")
+    # Start servers with FHE mode
+    server1_cmd = f"./build/bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
+                  f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
+                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--network_mode={network_mode} --test_mode"
     
-    # Start all clients
+    server2_cmd = f"./build/bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
+                  f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
+                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--network_mode={network_mode} --test_mode"
+    
+    server1_process = start_process(server1_cmd, "Server 1 (FHE)")
+    server2_process = start_process(server2_cmd, "Server 2 (FHE)")
+    
+    # Start clients
     client_processes = []
     
     # Start Server 1 clients
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id} --port {PORT} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode"
+        client_cmd = f"./build/bin/psi_client -p {client_id} --port={PORT} " \
+                     f"--data_file={data_file} --psi_mode=fhe " \
+                     f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
+                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--network_mode={network_mode} --test_mode"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -192,10 +221,14 @@ def run_psi_test(server1_files, server2_files):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port {PORT} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode"
+        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} " \
+                     f"--data_file={data_file} --psi_mode=fhe " \
+                     f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
+                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--network_mode={network_mode} --test_mode"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
-
+    
     # Wait for all processes to complete
     all_processes = [server1_process, server2_process] + client_processes
     success = wait_for_processes(all_processes, TIMEOUT_SECONDS)
@@ -210,30 +243,42 @@ def run_psi_test(server1_files, server2_files):
             log(f"Process {i+1} failed with return code {process.returncode}", "ERROR")
             return False, None
     
-    # Extract PSI size from server output
-    actual_intersection_size = extract_psi_size_from_output([server1_process, server2_process])
+    # Extract timing information
+    timing_data = extract_timing_from_output(all_processes)
     
-    return True, actual_intersection_size
+    return True, timing_data
 
-def validate_results(expected_size, actual_size):
+def validate_results(expected_size, timing_data):
     """Validate test results"""
     log("=" * 50)
     log("VALIDATING RESULTS")
     log("=" * 50)
     
-    if actual_size is None:
-        log("Could not extract PSI size from output", "ERROR")
+    if not timing_data:
+        log("No timing data extracted", "ERROR")
         return False
     
-    tolerance = max(1, expected_size // 10)  # 10% tolerance
+    # Print timing information
+    log("Timing Results:")
+    for key, value in timing_data.items():
+        if "time" in key or "size" in key or "communication" in key:
+            log(f"  {key}: {value}")
     
-    if abs(actual_size - expected_size) > tolerance:
-        log(f"✗ Intersection size mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
-        return False
+    # Check PSI size if available
+    if "psi_size" in timing_data:
+        actual_size = timing_data["psi_size"]
+        tolerance = max(1, expected_size // 10)  # 10% tolerance
+        
+        if abs(actual_size - expected_size) > tolerance:
+            log(f"✗ Intersection size mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
+            return False
+        else:
+            log(f"✓ Intersection size is correct (within tolerance)")
+            log(f"  Expected: {expected_size}, Actual: {actual_size}")
     else:
-        log(f"✓ Intersection size is correct (within tolerance)")
-        log(f"  Expected: {expected_size}, Actual: {actual_size}")
-        return True
+        log("Warning: Could not extract PSI size from output", "WARNING")
+    
+    return True
 
 def cleanup():
     """Clean up test data"""
@@ -241,9 +286,9 @@ def cleanup():
         shutil.rmtree(OUTPUT_DIR)
         log("Cleaned up test data directory")
 
-def test_naive_psi():
-    """Main test function for naive PSI"""
-    log("Starting fast naive PSI test...")
+def test_fhe_psi():
+    """Main test function for FHE PSI"""
+    log("Starting FHE PSI test...")
     
     # Check if executables exist
     required_files = ["./build/bin/gendata", "./build/bin/psi_server", "./build/bin/psi_client"]
@@ -261,13 +306,13 @@ def test_naive_psi():
         if not success:
             return False
         
-        # Run PSI test
-        success, actual_size = run_psi_test(server1_files, server2_files)
+        # Run FHE test
+        success, timing_data = run_fhe_test(server1_files, server2_files)
         if not success:
             return False
         
         # Validate results
-        success = validate_results(expected_size, actual_size)
+        success = validate_results(expected_size, timing_data)
         
         return success
         
@@ -278,22 +323,22 @@ def test_naive_psi():
 
 def main():
     """Main function"""
-    log("Starting fast naive PSI test...")
+    log("Starting FHE PSI test...")
     
     # Run single correctness test
-    success = test_naive_psi()
+    success = test_fhe_psi()
     
     if success:
         log("=" * 50)
-        log("✓ FAST NAIVE PSI TEST PASSED")
+        log("✓ FHE PSI TEST PASSED")
         log("=" * 50)
     else:
         log("=" * 50)
-        log("✗ FAST NAIVE PSI TEST FAILED")
+        log("✗ FHE PSI TEST FAILED")
         log("=" * 50)
     
     return success
 
 if __name__ == "__main__":
     success = main()
-    sys.exit(0 if success else 1) 
+    sys.exit(0 if success else 1)

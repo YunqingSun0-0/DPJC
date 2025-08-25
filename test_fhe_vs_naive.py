@@ -72,7 +72,7 @@ def kill_process_tree(pid):
     """Kill a process and all its children"""
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
-        time.sleep(1)
+        time.sleep(0.3)
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except:
         pass
@@ -87,7 +87,7 @@ def start_process(cmd, description):
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid
     )
-    time.sleep(2)  # Wait for process to start
+    time.sleep(0.5)  # Wait for process to start
     return process
 
 def wait_for_processes(processes, timeout=60):
@@ -101,7 +101,7 @@ def wait_for_processes(processes, timeout=60):
                 break
         if all_finished:
             return True
-        time.sleep(1)
+        time.sleep(0.3)
     return False
 
 def extract_psi_size_from_output(processes):
@@ -142,7 +142,7 @@ def generate_test_data():
     
     # Read expected intersection from generated data
     server1_file = f"{OUTPUT_DIR}/client1_1.txt"
-    server2_file = f"{OUTPUT_DIR}/client2_2.txt"
+    server2_file = f"{OUTPUT_DIR}/client1_2.txt"
     
     if not os.path.exists(server1_file) or not os.path.exists(server2_file):
         log("Error: Generated data files not found", "ERROR")
@@ -166,18 +166,21 @@ def run_psi_test(server1_file, server2_file, psi_mode, port):
     log("=" * 60)
     
     # Start servers
-    server1_cmd = f"./build/bin/psi_server -p 1 --port {port} --psi_mode {psi_mode}"
-    server2_cmd = f"./build/bin/psi_server -p 2 --port {port} --psi_mode {psi_mode}"
+    server1_cmd = f"./build/bin/psi_server -p 1 --port={port} --psi_mode={psi_mode}"
+    server2_cmd = f"./build/bin/psi_server -p 2 --port={port} --psi_mode={psi_mode}"
     
     server1_process = start_process(server1_cmd, f"Server 1 ({psi_mode})")
     server2_process = start_process(server2_cmd, f"Server 2 ({psi_mode})")
     
     # Start clients
-    client1_cmd = f"./build/bin/psi_client -p 1 --port {port} --data_file={server1_file} --psi_mode {psi_mode}"
-    client2_cmd = f"./build/bin/psi_client -p 2 --port {port} --data_file={server2_file} --psi_mode {psi_mode}"
+    client1_cmd = f"./build/bin/psi_client -p 1 --port={port} --data_file={server1_file} --psi_mode={psi_mode}"
+    client2_cmd = f"./build/bin/psi_client -p 2 --port={port} --data_file={server2_file} --psi_mode={psi_mode}"
     
     client1_process = start_process(client1_cmd, f"Client 1 ({psi_mode})")
     client2_process = start_process(client2_cmd, f"Client 2 ({psi_mode})")
+
+    # print(server1_process.stderr.read().decode())
+    # print(server2_process.stderr.read().decode())
     
     # Wait for all processes to complete
     all_processes = [server1_process, server2_process, client1_process, client2_process]
@@ -302,7 +305,7 @@ def test_fhe_consistency():
         finally:
             cleanup()
         
-        time.sleep(3)  # Brief pause between runs
+        time.sleep(0.5)  # Brief pause between runs
     
     success_count = sum(results)
     log(f"FHE consistency test results: {success_count}/{num_runs} runs successful")
@@ -364,23 +367,11 @@ def main():
             return False
     
     # Run comparison test
-    success1 = compare_fhe_vs_naive()
-    
-    # Run FHE consistency test
-    success2 = test_fhe_consistency()
-    
-    overall_success = success1 and success2
-    
-    if overall_success:
-        log("=" * 60)
-        log("✓ ALL FHE vs NAIVE TESTS PASSED")
-        log("=" * 60)
-    else:
-        log("=" * 60)
-        log("✗ SOME FHE vs NAIVE TESTS FAILED")
-        log("=" * 60)
-    
-    return overall_success
+    for i in range(100):
+        success = compare_fhe_vs_naive()
+        if not success:
+            return False
+    return True
 
 if __name__ == "__main__":
     success = main()

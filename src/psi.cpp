@@ -40,12 +40,16 @@ using namespace emp;
 
 // ------------ prg_nondeter_He Implementation ------------
 
+// Global communication size counter for server1
+static size_t total_communication_size = 0;
+
 template<typename T>
 void iosend(int party, emp::NetIO* io, const T& key) {
     std::stringstream stream;
     auto size = key.save(stream, compr_mode_type::zstd);
     string str = stream.str();
     size_t send_size = str.size();
+    if (party == 1) total_communication_size += sizeof(send_size) + send_size;
     // std::cerr << "[Party " << party << "] Sent "<< typeid(T).name() << " bytes: " << send_size << std::endl;
     io->send_data(&send_size, sizeof(send_size));
     io->send_data(str.data(), send_size);
@@ -59,6 +63,7 @@ void iorecv(int party, emp::NetIO* io, const SEALContext& context, T& key) {
     io->recv_data(&str[0], recv_size);
     std::stringstream stream(str);
     key.load(context, stream);
+    if (party == 1) total_communication_size += sizeof(recv_size) + recv_size;
     // std::cerr << "[Party " << party << "] Received "<< typeid(T).name() << " bytes: " << recv_size << std::endl;
 }
 
@@ -96,6 +101,13 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     
     // 阶段1: Server生成seed和密钥
     std::cerr << "[Server" << party << "] Phase 1: Generating seeds and keys" << std::endl;
+
+    // 开始时间统计
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto key_gen_start = start_time;
+    
+    // Reset communication size counter for server1
+    if (party == 1) total_communication_size = 0;
     
     EncryptionParameters parms(scheme_type::bfv);
     size_t poly_modulus_degree = config.seal_degree;
@@ -108,7 +120,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
 
     // 生成密钥
     KeyGenerator keygen(context);
-    SecretKey secret_key = keygen.secret_key();
+    SecretKey secret_key = keygen.secret_key(), sk_noise_budget;
     PublicKey public_key;
     keygen.create_public_key(public_key);
     RelinKeys relin_key_1, relin_key_2;
@@ -121,6 +133,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
 
     // 生成并加密seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
+    // std::mt19937_64 rnd(19920929+party*1000000000); // ftest_fhe_vs_naive.py 专用
     AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
     std::vector<std::vector<uint64_t>> batch_seed(config.seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
 
@@ -136,6 +149,19 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     for(int i = 0; i < config.seed_size; ++i) {
         batch_encoder.encode(batch_seed[i], plain_seed[i]);
         encryptor.encrypt(plain_seed[i], encrypted_seed_1[i]);
+    }
+    if(!get_config().test_mode) {
+        std::cerr << "noise budget - encrypt seed: " << decryptor.invariant_noise_budget(encrypted_seed_1[0]) << std::endl;
+        if(party == 1) {
+            iosend(party, server_io, secret_key);
+            server_io->flush();
+            iorecv(party, server_io, context, sk_noise_budget);
+        } else {
+            iorecv(party, server_io, context, sk_noise_budget);
+            iosend(party, server_io, sk_noise_budget);
+            server_io->flush();
+        }
+
     }
     
     if(party == 1) {
@@ -154,6 +180,21 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     for(int i = 0; i < config.seed_size; ++i) {
         evaluator.multiply_plain_inplace(encrypted_seed_2[i], plain_seed[i]);
         evaluator.mod_switch_to_next_inplace(encrypted_seed_2[i]);
+    }
+    if(!get_config().test_mode) {
+        Decryptor decryptor_noise_budget(context, sk_noise_budget);
+        std::cerr << "noise budget - multiply seed: " << decryptor_noise_budget.invariant_noise_budget(encrypted_seed_2[0]) << std::endl;
+    }
+
+    // 计算密钥生成和传输时间
+    auto key_gen_end = std::chrono::high_resolution_clock::now();
+    auto key_gen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(key_gen_end - key_gen_start);
+    double key_gen_time = key_gen_duration.count() / 1000.0;
+    
+    // 输出实际通信大小（以server1为准）
+    if (party == 1) {
+        std::cerr << "Key generation time: " << key_gen_time << "s" << std::endl;
+        std::cerr << "Key generation Communication: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
     }
 
     // 阶段2: 等待client处理完成
@@ -190,6 +231,10 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
 
     // 阶段3: Server进行secret sharing和MPC计算
     std::cerr << "[Server" << party << "] Phase 3: Secret sharing and MPC computation" << std::endl;
+    
+    // 开始服务器恢复时间统计
+    auto server_recover_start = std::chrono::high_resolution_clock::now();
+    if (party == 1) total_communication_size = 0;
 
     // 与其他server进行secret sharing
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
@@ -211,7 +256,6 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         server_io->flush();
     }
     
-    std::cerr<<"[Server" << party << "] final noise budget: " << decryptor.invariant_noise_budget(esti_cipher_2) << std::endl;
     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
     batch_encoder.decode(rnd_2_plain, rnd_2);
 
@@ -269,6 +313,26 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<int64_t>(PUBLIC);
     delete[] esti_1, esti_2, esti_sum;
     finalize_semi_honest();
+    
+    // 计算服务器恢复时间
+    auto server_recover_end = std::chrono::high_resolution_clock::now();
+    auto server_recover_duration = std::chrono::duration_cast<std::chrono::milliseconds>(server_recover_end - server_recover_start);
+    double server_recover_time = server_recover_duration.count() / 1000.0;
+    
+    if(party == 1) {
+        std::cerr << "Server recovery time: " << server_recover_time << "s" << std::endl;
+        std::cerr << "Server recovery Communication: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
+    }
+    
+    // 计算总时间
+    auto total_end = std::chrono::high_resolution_clock::now();
+    auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - start_time);
+    double total_time = total_duration.count() / 1000.0;
+    
+    if(party == 1) {
+        std::cerr << "Total server time: " << total_time << "s" << std::endl;
+    }
+    
     return psi_ca / get_config().mom_kk;
 }
 
@@ -306,6 +370,9 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
     }
     
     // 处理输入集合
+    // 开始客户端计算时间统计
+    auto client_compute_start = std::chrono::high_resolution_clock::now();
+    
     AESGen aes_gen(0);
     std::unordered_map<uint64_t, Ciphertext> t_map;
     std::stack<std::pair<int, Ciphertext>> t_stack_in;
@@ -358,11 +425,17 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
         t_stack_in.pop();
     }
     
+    // 计算客户端计算时间
+    auto client_compute_end = std::chrono::high_resolution_clock::now();
+    auto client_compute_duration = std::chrono::duration_cast<std::chrono::milliseconds>(client_compute_end - client_compute_start);
+    double client_compute_time = client_compute_duration.count() / 1000.0;
+    
+    std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
+    std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
+
     // 发送结果给对应的server
     iosend(party, io, esti_cipher);
     io->flush();
-    
-    std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
     return -1; // Client不返回PSI大小
 }
 
@@ -393,6 +466,7 @@ int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>&
     
     // 阶段1: 生成明文seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
+    // std::mt19937_64 rnd(19920929+party*1000000000); // ftest_fhe_vs_naive.py 专用
     AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
     std::vector<std::vector<uint8_t>> seeds(config.seed_size);
     
@@ -478,7 +552,7 @@ int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>&
         }
         for(int i = 0; i < tot_rounds; ++i) combined_result[i] *= result[i];
         for(int tt = 0, i = 0; tt < config.mom_tt; ++tt) {
-            uint64_t sum = 0;
+            int64_t sum = 0;
             for(int kk = 0; kk < config.mom_kk; ++kk, ++i) {
                 sum += combined_result[i];
             }

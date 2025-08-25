@@ -25,22 +25,27 @@ void run_client(int client_id, int server_id, const std::string& data_file = "")
     emp::NetIO* client_io = new emp::NetIO("127.0.0.1", real_port);
     
     // 获取client的输入集合
-    FileInputProvider* input;
+    std::vector<int> input_set;
+    
     if (!data_file.empty()) {
-        input = new FileInputProvider(data_file);
+        // 使用文件数据
+        FileInputProvider input(data_file);
+        input_set = input.get_input_set();
         std::cout << "[Client" << client_id << "] Loading data from file: " << data_file << std::endl;
     } else {
-        std::cerr << "Error: No data file provided" << std::endl;
-        return;
+        // 使用全局数据管理器
+        ClientDataProvider input(client_id, server_id);
+        input_set = input.get_input_set();
+        std::cout << "[Client" << client_id << "] Loading data from global data manager" << std::endl;
     }
-    std::cout << "[Client" << client_id << "] input_set size: " << input->get_input_set().size() << std::endl;
+    
+    std::cout << "[Client" << client_id << "] input_set size: " << input_set.size() << std::endl;
     
     // 执行client端的PSI计算
-    int result = psi_client(client_id, server_id, input->get_input_set(), client_io);
+    int result = psi_client(client_id, server_id, input_set, client_io);
     
     std::cout << "[Client" << client_id << "] Processing completed" << std::endl;
     
-    delete input;
     delete client_io;
 }
 
@@ -64,7 +69,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0] << " -p <client_id> [-port <port>] [--data_file=<filename>] [--num_clients_per_server=<n>]\n";
             std::cout << "  client_id: Client ID (1, 2, ...)\n";
             std::cout << "  port: Network port for server\n";
-            std::cout << "  data_file: Optional file containing input data\n";
+            std::cout << "  data_file: Optional file containing input data (if not provided, uses global data manager)\n";
             return 0;
         }
     }
