@@ -97,8 +97,9 @@ def extract_timing_from_output(processes):
             stderr = process.stderr.read().decode() if process.stderr else ""
             output = stdout + stderr
             
-            log(f"Process {i+1} output:")
-            log(output[:1000] + "..." if len(output) > 1000 else output)
+            if i < 3: # Servers
+                log(f"Process {i+1} output:")
+                log(output[:1000] + "..." if len(output) > 1000 else output)
             
             # Extract timing information
             key_gen_match = re.search(r'Key generation time: ([\d.]+)s', output)
@@ -185,20 +186,18 @@ def run_fhe_test(server1_files, server2_files):
     
     # FHE parameters
     seed_size = 64
-    prg_dd = 4
+    prg_dd = 6
     network_mode = "lan"
     
     # Start servers with FHE mode
     server1_cmd = f"./build/bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size={seed_size} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode} --test_mode"
-    
+                  f"--network_mode={network_mode}"
     server2_cmd = f"./build/bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size={seed_size} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode} --test_mode"
-    
+                  f"--network_mode={network_mode}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
     
@@ -213,7 +212,7 @@ def run_fhe_test(server1_files, server2_files):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size={seed_size} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode} --test_mode"
+                     f"--network_mode={network_mode}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -225,7 +224,7 @@ def run_fhe_test(server1_files, server2_files):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size={seed_size} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode} --test_mode"
+                     f"--network_mode={network_mode}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
     

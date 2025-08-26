@@ -15,10 +15,10 @@ NUM_RUNS_PER_POINT = 1  # Number of runs per parameter combination
 PORT_BASE = 22000  # Base port for tests
 
 # Parameter ranges for different test types
-SEED_SIZE_VALUES = [64, 128]  # seed_size values
-SET_SIZE_VALUES = [1 << 8, 1 << 10, 1 << 12]  # set sizes for client computation
+SEED_SIZE_VALUES = [6, 7]  # seed_size values
+SET_SIZE_VALUES = [1 << 8, 1 << 10, 1 << 12, 1 << 14]  # set sizes for client computation
 # SET_SIZE_VALUES = [1 << 6, 1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18]  # set sizes for client computation
-PRG_DD_VALUES = [4, 6, 8]  # d values for client computation
+PRG_DD_VALUES = [4, 5, 6, 7, 8]  # d values for client computation
 NETWORK_MODES = ['lan', 'wan']  # Network simulation modes
 
 # Test parameters
@@ -34,7 +34,7 @@ PLOTS_DIR = "./fhe_performance_plots"
 # ==================== FHE SPECIFIC PARAMETERS ====================
 
 # Default FHE parameters
-DEFAULT_SEED_SIZE = 64
+DEFAULT_SEED_SIZE = 6
 DEFAULT_PRG_DD = 6
 DEFAULT_NETWORK_MODE = "lan"
 

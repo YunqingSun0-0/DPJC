@@ -112,7 +112,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     EncryptionParameters parms(scheme_type::bfv);
     size_t poly_modulus_degree = config.seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 52, 52, 36, 24, 24 }));
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, config.seal_coeff_modulus));
     parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, config.seal_plain_modulus));
 
     SEALContext context(parms);
@@ -158,7 +158,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
             iorecv(party, server_io, context, sk_noise_budget);
         } else {
             iorecv(party, server_io, context, sk_noise_budget);
-            iosend(party, server_io, sk_noise_budget);
+            iosend(party, server_io, secret_key);
             server_io->flush();
         }
 
@@ -181,10 +181,6 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         evaluator.multiply_plain_inplace(encrypted_seed_2[i], plain_seed[i]);
         evaluator.mod_switch_to_next_inplace(encrypted_seed_2[i]);
     }
-    if(!get_config().test_mode) {
-        Decryptor decryptor_noise_budget(context, sk_noise_budget);
-        std::cerr << "noise budget - multiply seed: " << decryptor_noise_budget.invariant_noise_budget(encrypted_seed_2[0]) << std::endl;
-    }
 
     // 计算密钥生成和传输时间
     auto key_gen_end = std::chrono::high_resolution_clock::now();
@@ -195,6 +191,15 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     if (party == 1) {
         std::cerr << "Key generation time: " << key_gen_time << "s" << std::endl;
         std::cerr << "Key generation Communication: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
+    }
+
+    if(!get_config().test_mode) {
+        Decryptor decryptor_noise_budget(context, sk_noise_budget);
+        std::cerr << "noise budget - multiply seed: " << decryptor_noise_budget.invariant_noise_budget(encrypted_seed_2[0]) << std::endl;
+        for(auto & client_io : client_connections) {
+            iosend(party, client_io, sk_noise_budget);
+            client_io->flush();
+        }
     }
 
     // 阶段2: 等待client处理完成
@@ -244,6 +249,11 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     Plaintext rnd_1_plain, rnd_2_plain;
     batch_encoder.encode(rnd_1, rnd_1_plain);
     evaluator.sub_plain_inplace(combined_result, rnd_1_plain);
+
+    if(!get_config().test_mode) {
+        Decryptor decryptor_noise_budget(context, sk_noise_budget);
+        std::cerr << "noise budget - before sharing: " << decryptor_noise_budget.invariant_noise_budget(combined_result) << std::endl;
+    }
     
     Ciphertext esti_cipher_1, esti_cipher_2;
     if(party == 1) {
@@ -353,7 +363,7 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
     EncryptionParameters parms(scheme_type::bfv);
     size_t poly_modulus_degree = config.seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, { 52, 52, 36, 24, 24 }));
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, config.seal_coeff_modulus));
     parms.set_plain_modulus(PlainModulus::Batching(poly_modulus_degree, config.seal_plain_modulus));
 
     SEALContext context(parms);
@@ -361,8 +371,13 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
     Evaluator evaluator(context);
     
     RelinKeys relin_key;
+    SecretKey sk_noise_budget;
     std::vector<Ciphertext> encrypted_seed(config.seed_size);
     
+    if(!get_config().test_mode) {
+        iorecv(party, io, context, sk_noise_budget);
+    }
+
     // 从对应的server接收密钥和seeds
     iorecv(party, io, context, relin_key);
     for(int i = 0; i < config.seed_size; ++i) {
@@ -397,12 +412,20 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
                 }
             }
         }
+        if(!get_config().test_mode) {
+            Decryptor decryptor_noise_budget(context, sk_noise_budget);
+            std::cerr << "noise budget - multiply 1: " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
+        }
         for(int w = 2; w < config.prg_dd; w <<= 1) {
             for(int i = 0; i < config.prg_dd; i += (w<<1)) {
                 if(i + w < config.prg_dd) {
                     evaluator.multiply_inplace(calc_prg[i], calc_prg[i + w]);
                     evaluator.relinearize_inplace(calc_prg[i], relin_key);
                 }
+            }
+            if(!get_config().test_mode) {
+                Decryptor decryptor_noise_budget(context, sk_noise_budget);
+                std::cerr << "noise budget - multiply " << w << ": " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
             }
         }
         auto sum_prg = std::make_pair(1, calc_prg[0]);

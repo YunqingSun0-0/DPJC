@@ -35,7 +35,7 @@ except ImportError:
     NUM_CLIENTS_PER_SERVER = 1
     NUM_RUNS_PER_POINT = 5  # Number of runs per parameter combination
     PORT_BASE = 22000  # Base port for tests
-    SEED_SIZE_VALUES = [64, 128]  # seed_size values
+    SEED_SIZE_VALUES = [6, 7]  # seed_size values
     SET_SIZE_VALUES = [1 << 6, 1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18]  # set sizes for client computation
     PRG_DD_VALUES = [4, 5, 6, 7, 8]  # d values for client computation
     NETWORK_MODES = ['lan', 'wan']  # Network simulation modes
@@ -46,7 +46,7 @@ except ImportError:
     DATA_DIR = "./fhe_performance_data"
     PLOTS_DIR = "./fhe_performance_plots"
     # Default values for tests
-    DEFAULT_SEED_SIZE = 64
+    DEFAULT_SEED_SIZE = 6
     DEFAULT_PRG_DD = 6
     DEFAULT_NETWORK_MODE = "lan"
 
@@ -257,12 +257,12 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
     # Start servers with FHE mode
     server1_cmd = f"./build/bin/psi_server -p 1 --port={port} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode} --test_mode"
     
     server2_cmd = f"./build/bin/psi_server -p 2 --port={port} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode} --test_mode"
     
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
@@ -278,7 +278,7 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
         client_cmd = f"./build/bin/psi_client -p {client_id} --port={port} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                      f"--network_mode={network_mode} --test_mode"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
@@ -290,7 +290,7 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
         client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                      f"--network_mode={network_mode} --test_mode"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <vector>
 
 struct GlobalConfig {
     std::string psi_mode = "naive";
@@ -20,7 +21,14 @@ struct GlobalConfig {
     int mom_kk = 30, mom_tt = 100; // median of means
 
     size_t seal_degree = 8192;
-    size_t seal_plain_modulus = 20;
+    size_t seal_plain_modulus = 24;
+    std::vector<int> seal_coeff_modulus = { 60, 60, 36, 27, 27 };
+    /*
+    input_size; seal_plain_modulus; coeff_modulus; noise budget
+    10; 20; 188 = { 52, 52, 36, 24, 24 }; {188, 136, 111, 76, 44, 12, 7}
+    10; 24; 210 = { 60, 60, 36, 27, 27 }; {210, 151, 122, 86, 50, 14, 9}
+    10; 28;
+    */
     
     int num_clients_per_server = 1;
     
