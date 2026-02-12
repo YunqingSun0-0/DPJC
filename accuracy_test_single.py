@@ -173,8 +173,8 @@ def run_psi_test(server1_files, server2_files):
     log("=" * 50)
     
     # Start servers
-    server1_cmd = f"./build/bin/psi_server -p 1 --port {PORT} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
-    server2_cmd = f"./build/bin/psi_server -p 2 --port {PORT} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server1_cmd = f"./build/bin/psi_server -p 1 --port={PORT} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server2_cmd = f"./build/bin/psi_server -p 2 --port={PORT} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
     
     server1_process = start_process(server1_cmd, "Server 1")
     server2_process = start_process(server2_cmd, "Server 2")
@@ -186,7 +186,7 @@ def run_psi_test(server1_files, server2_files):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id} --port {PORT} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./build/bin/psi_client -p {client_id} --port={PORT} --data_file={data_file} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -194,7 +194,7 @@ def run_psi_test(server1_files, server2_files):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port {PORT} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} --data_file={data_file} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
 

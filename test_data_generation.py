@@ -94,9 +94,9 @@ def validate_data_generation():
     for server_id in [1, 2]:
         for client_id in range(1, NUM_CLIENTS_PER_SERVER + 1):
             if server_id == 1:
-                filename = f"{OUTPUT_DIR}/client{client_id + 2}_1.txt"
+                filename = f"{OUTPUT_DIR}/client{client_id}_1.txt"
             else:
-                filename = f"{OUTPUT_DIR}/client{client_id + 2 + NUM_CLIENTS_PER_SERVER}_2.txt"
+                filename = f"{OUTPUT_DIR}/client{client_id}_2.txt"
             client_files.append((filename, server_id, client_id))
     
     # Read sets for each server

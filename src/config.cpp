@@ -36,9 +36,9 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             prg_dd = std::stoull(val);
         } else if (auto val = get_value("--psi_mode="); !val.empty()) {
             psi_mode = val;
-        } else if (auto val = get_value("--mom_kk="); !val.empty()) {
+        } else if (auto val = get_value("--mom_k="); !val.empty()) {
             mom_kk = std::stoi(val);
-        } else if (auto val = get_value("--mom_tt="); !val.empty()) {
+        } else if (auto val = get_value("--mom_t="); !val.empty()) {
             mom_tt = std::stoi(val);
         } else if (auto val = get_value("--seal_degree="); !val.empty()) {
             seal_degree = std::stoul(val);

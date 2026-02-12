@@ -5,7 +5,7 @@
 
 struct GlobalConfig {
     std::string psi_mode = "naive";
-    bool test_mode = false;
+    bool test_mode = true;
     /*
     naive: not secure, used for accuracy test
     fhe: secure, used for performance test

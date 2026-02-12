@@ -29,18 +29,18 @@ PORT_BASE = 21000  # Base port for tests
 
 # Parameter ranges
 PRG_DD_VALUES = [4, 5, 6, 7, 8]
-MOM_K_VALUES = [20, 40, 60, 80, 100]
+MOM_K_VALUES = [100]
 MOM_T = 80  # Fixed mom_t value
-NUM_RUNS_PER_POINT = 100  # Number of runs per parameter combination
+NUM_RUNS_PER_POINT = 50  # Number of runs per parameter combination
 
 # Test parameters
 TIMEOUT_SECONDS = 30
 VERBOSE = False
 
 # Output directories
-RESULTS_DIR = "./batch_test_results_08120040"
+RESULTS_DIR = "./batch_test_results"
 DATA_DIR = "./batch_test_data"
-PLOTS_DIR = "./batch_test_plots_08120040"
+PLOTS_DIR = "./batch_test_plots"
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -194,8 +194,8 @@ def run_single_test(test_id, prg_dd, mom_k, test_data_info):
     port = PORT_BASE + test_id % 1000  # Use modulo to avoid port conflicts
     
     # Start servers
-    server1_cmd = f"./build/bin/psi_server -p 1 --port {port} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
-    server2_cmd = f"./build/bin/psi_server -p 2 --port {port} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
+    server1_cmd = f"./build/bin/psi_server -p 1 --port={port} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
+    server2_cmd = f"./build/bin/psi_server -p 2 --port={port} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
     
     server1_process = start_process(server1_cmd, f"Server 1 (test {test_id})")
     server2_process = start_process(server2_cmd, f"Server 2 (test {test_id})")
@@ -207,7 +207,7 @@ def run_single_test(test_id, prg_dd, mom_k, test_data_info):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id} --port {port} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
+        client_cmd = f"./build/bin/psi_client -p {client_id} --port={port} --data_file={data_file} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1, test {test_id})")
         client_processes.append(client_process)
     
@@ -215,7 +215,7 @@ def run_single_test(test_id, prg_dd, mom_k, test_data_info):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port {port} --data_file={data_file} --psi_mode naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
+        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} --data_file={data_file} --psi_mode=naive --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={MOM_T} --prg_dd={prg_dd}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2, test {test_id})")
         client_processes.append(client_process)
 
@@ -422,7 +422,8 @@ def analyze_results():
 def create_plots(analysis_results):
     """Create plots from analysis results"""
     log("Creating plots...")
-    
+    plt.rcParams.update({'font.size': 16})
+
     if not analysis_results:
         log("No analysis results to plot", "ERROR")
         return False
@@ -431,7 +432,7 @@ def create_plots(analysis_results):
     plt.figure(figsize=(12, 8))
     
     # Colors for different mom_k values
-    colors = ['red', 'blue', 'green', 'orange', 'purple']
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'brown', 'pink', 'gray']
     color_map = {mom_k: colors[i] for i, mom_k in enumerate(MOM_K_VALUES)}
     
     # Plot data for each mom_k
@@ -457,8 +458,8 @@ def create_plots(analysis_results):
                         marker='o', capsize=5, capthick=2, linewidth=2, markersize=8)
     
     plt.xlabel('prg_dd', fontsize=14)
-    plt.ylabel('Error Ratio (actual/expected intersection size)', fontsize=14)
-    plt.title('PSI Error Analysis: Error Ratio vs prg_dd for Different mom_k Values', fontsize=16)
+    plt.ylabel('Error Ratio', fontsize=14)
+    # plt.title('PSI Error Analysis: Error Ratio vs prg_dd for Different mom_k Values', fontsize=16)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.xticks(PRG_DD_VALUES)
@@ -488,11 +489,11 @@ def create_plots(analysis_results):
                     box_labels.append(f'prg_dd={prg_dd}\nmom_k={mom_k}')
     
     if box_data:
-        plt.boxplot(box_data, labels=box_labels)
-        plt.xlabel('Parameter Combinations', fontsize=14)
-        plt.ylabel('Error Ratio (actual/expected intersection size)', fontsize=14)
-        plt.title('PSI Error Distribution: Box Plot of Error Ratios', fontsize=16)
-        plt.xticks(rotation=45)
+        plt.boxplot(box_data, tick_labels=box_labels,  showfliers=False)
+        # plt.xlabel('Parameter Combinations', fontsize=14)
+        plt.ylabel('Error Ratio ', fontsize=20)
+        plt.title('PSI Error Distribution', fontsize=20)
+        plt.xticks(rotation=45, fontsize=16)
         plt.grid(True, alpha=0.3)
         
         # Save box plot
