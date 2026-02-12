@@ -6,6 +6,14 @@
 
 fhe 的几个程序，我本机跑不了。我估计是psi-mode换了应该能跑成功，但是集成的python不知道有没有问题
 
+`fhe_test_single.py` 测试单组数据，跑通后跑 `fhe_performance_test_batch.py` 测试多组数据然后会输出各个部分的时间和commu size, `fhe_performance_test_batch.py` 的参数在 `fhe_test_config.py` 里
+
+fhe 的正确性可以通过不开 --test_mode (但是默认开了我已经，只能在 config.h 里改了) 来测试，不开的话造数据的 seed 固定，这样只用检查 naive 和 fhe 的结果是否一样就行了
+
+lan wan 没有实现
+
+数据全部都存到指定文件夹下了
+
 # 可执行文件运行示例
 
 ## 生成数据
