@@ -1,0 +1,17 @@
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Build outputs
+build/
+bin/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Local experiment/data outputs
+experiments/
+test_naive_data/

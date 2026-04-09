@@ -5,7 +5,7 @@
 
 struct GlobalConfig {
     std::string psi_mode = "naive";
-    bool test_mode = true;
+    bool test_mode = false;
     /*
     naive: not secure, used for accuracy test
     fhe: secure, used for performance test
@@ -13,12 +13,12 @@ struct GlobalConfig {
     int port = 20929;
     int party = 0;
 
-    int universal_set_size = 1<<20, universal_set_size_bit = 20;
-    int seed_size = 1<<6, seed_size_bit = 6;
+    int universal_set_size = 1<<24, universal_set_size_bit = 24;
+    int seed_size = 1<<8, seed_size_bit = 8;
     uint64_t prg_seed = 998244353;
-    uint64_t prg_dd = 6;
+    uint64_t prg_dd = 7;
 
-    int mom_kk = 30, mom_tt = 100; // median of means
+    int mom_kk = 400, mom_tt = 11; // median of means
 
     size_t seal_degree = 8192;
     size_t seal_plain_modulus = 24;

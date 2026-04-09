@@ -10,7 +10,7 @@ This file contains all configurable parameters for FHE performance testing
 SET_SIZE = 1 << 12  # 2^18 = 262,144 elements
 INTERSECTION_SIZE = SET_SIZE // 2  # Half of set size
 UNIVERSAL_SIZE_BIT = 24
-NUM_CLIENTS_PER_SERVER = 4
+NUM_CLIENTS_PER_SERVER = 1
 NUM_RUNS_PER_POINT = 1  # Number of runs per parameter combination
 PORT_BASE = 22000  # Base port for tests
 

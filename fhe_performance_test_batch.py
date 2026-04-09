@@ -227,7 +227,7 @@ def generate_test_data(set_size, intersection_size, output_dir):
         shutil.rmtree(output_dir)
     
     # Generate test data
-    cmd = f"./build/bin/gendata --intersection_size={intersection_size} " \
+    cmd = f"./bin/gendata --intersection_size={intersection_size} " \
           f"--universal_size_bit={UNIVERSAL_SIZE_BIT} " \
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
           f"--set_size={set_size} " \
@@ -255,12 +255,12 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
     log(f"Running FHE test: seed_size={seed_size}, prg_dd={prg_dd}, network={network_mode}")
     
     # Start servers with FHE mode
-    server1_cmd = f"./build/bin/psi_server -p 1 --port={port} --psi_mode=fhe " \
+    server1_cmd = f"./bin/psi_server -p 1 --port={port} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode} --test_mode"
     
-    server2_cmd = f"./build/bin/psi_server -p 2 --port={port} --psi_mode=fhe " \
+    server2_cmd = f"./bin/psi_server -p 2 --port={port} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode} --test_mode"
@@ -275,7 +275,7 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id} --port={port} " \
+        client_cmd = f"./bin/psi_client -p {client_id} --port={port} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
@@ -287,7 +287,7 @@ def run_fhe_test(server1_files, server2_files, seed_size, prg_dd, network_mode, 
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"./build/bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} " \
+        client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size} --prg_dd={prg_dd} " \
@@ -395,7 +395,7 @@ def run_batch_tests():
     log("=" * 60)
     
     # Check if executables exist
-    required_files = ["./build/bin/gendata", "./build/bin/psi_server", "./build/bin/psi_client"]
+    required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
     for file in required_files:
         if not os.path.exists(file):
             log(f"Error: {file} not found. Please build the project first.", "ERROR")
