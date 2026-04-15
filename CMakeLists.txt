@@ -38,7 +38,7 @@ add_executable(psi_server
     src/config.cpp
 )
 
-target_link_libraries(psi_server emp-tool SEAL::seal OpenSSL::Crypto pthread)
+target_link_libraries(psi_server emp-tool SEAL::seal_shared OpenSSL::Crypto pthread)
 
 # Client程序
 add_executable(psi_client
@@ -47,7 +47,7 @@ add_executable(psi_client
     src/config.cpp
 )
 
-target_link_libraries(psi_client emp-tool SEAL::seal OpenSSL::Crypto pthread)
+target_link_libraries(psi_client emp-tool SEAL::seal_shared OpenSSL::Crypto pthread)
 
 # 数据生成程序
 add_executable(gendata
