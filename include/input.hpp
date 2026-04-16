@@ -9,9 +9,13 @@
 #include <algorithm>
 #include <unordered_map>
 #include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include "config.h"
+#include "psi.h"
 
-std::vector<int> read_set_from_file(const std::string& filename) {
-    std::vector<int> set;
+std::vector<WeightedInput> read_set_from_file(const std::string& filename) {
+    std::vector<WeightedInput> set;
     std::ifstream file(filename);
     
     if (!file.is_open()) {
@@ -19,9 +23,33 @@ std::vector<int> read_set_from_file(const std::string& filename) {
         return set;
     }
     
-    int element;
-    while (file >> element) {
-        set.push_back(element);
+    std::string line;
+    int line_number = 0;
+    const int max_value = get_config().universal_set_size;
+    while (std::getline(file, line)) {
+        ++line_number;
+        if (line.empty()) {
+            continue;
+        }
+
+        std::istringstream iss(line);
+        WeightedInput item;
+        if (!(iss >> item.value)) {
+            continue;
+        }
+        if (!(iss >> item.weight)) {
+            item.weight = 1;
+        }
+        if (item.value < 0 || item.value >= max_value) {
+            throw std::runtime_error(
+                "Input value out of range in file " + filename +
+                " at line " + std::to_string(line_number) +
+                ": value=" + std::to_string(item.value) +
+                ", expected 0 <= value < " + std::to_string(max_value) +
+                " (set by --universal_set_size_bit=" + std::to_string(get_config().universal_set_size_bit) + ")"
+            );
+        }
+        set.push_back(item);
     }
     
     file.close();
@@ -30,13 +58,13 @@ std::vector<int> read_set_from_file(const std::string& filename) {
 
 class FileInputProvider {
 private:
-    std::vector<int> input_set;
+    std::vector<WeightedInput> input_set;
     
 public:
     FileInputProvider(const std::string& filename) {
         input_set = read_set_from_file(filename);
     }
-    std::vector<int> get_input_set() const {
+    std::vector<WeightedInput> get_input_set() const {
         return input_set;
     }
 };
@@ -47,7 +75,7 @@ private:
     static GlobalDataManager* instance;
     static std::mutex instance_mutex;
     
-    std::unordered_map<std::string, std::vector<int>> client_data_cache;
+    std::unordered_map<std::string, std::vector<WeightedInput>> client_data_cache;
     std::mutex cache_mutex;
     std::mt19937 rng;
     bool data_generated = false;
@@ -88,7 +116,7 @@ private:
         
         // 为Server 1的每个client生成独立数据
         for (int client = 0; client < num_clients_per_server; ++client) {
-            std::vector<int> client_set;
+            std::vector<WeightedInput> client_set;
             std::set<int> client_used;
             
             // 每个client包含部分交集元素
@@ -97,7 +125,7 @@ private:
             int end_idx = (client == num_clients_per_server - 1) ? intersection_size : (client + 1) * intersection_per_client;
             
             for (int i = start_idx; i < end_idx; ++i) {
-                client_set.push_back(intersection[i]);
+                client_set.push_back({intersection[i], 1});
                 client_used.insert(intersection[i]);
             }
             
@@ -108,7 +136,7 @@ private:
                     element = std::uniform_int_distribution<int>(0, universal_size - 1)(rng);
                 } while (client_used.count(element) || used_elements.count(element));
                 
-                client_set.push_back(element);
+                client_set.push_back({element, 1});
                 client_used.insert(element);
                 used_elements.insert(element);
             }
@@ -119,7 +147,7 @@ private:
         
         // 为Server 2的每个client生成独立数据
         for (int client = 0; client < num_clients_per_server; ++client) {
-            std::vector<int> client_set;
+            std::vector<WeightedInput> client_set;
             std::set<int> client_used;
             
             // 每个client包含部分交集元素
@@ -128,7 +156,7 @@ private:
             int end_idx = (client == num_clients_per_server - 1) ? intersection_size : (client + 1) * intersection_per_client;
             
             for (int i = start_idx; i < end_idx; ++i) {
-                client_set.push_back(intersection[i]);
+                client_set.push_back({intersection[i], 1});
                 client_used.insert(intersection[i]);
             }
             
@@ -139,7 +167,7 @@ private:
                     element = std::uniform_int_distribution<int>(0, universal_size - 1)(rng);
                 } while (client_used.count(element) || used_elements.count(element));
                 
-                client_set.push_back(element);
+                client_set.push_back({element, 1});
                 client_used.insert(element);
                 used_elements.insert(element);
             }
@@ -170,7 +198,7 @@ public:
     }
     
     // 获取client数据
-    std::vector<int> get_client_data(int client_id, int server_id) {
+    std::vector<WeightedInput> get_client_data(int client_id, int server_id) {
         // 确保数据已生成
         generate_all_data();
         
@@ -184,7 +212,7 @@ public:
         
         // 如果找不到数据，返回空向量
         std::cerr << "[DataManager] Warning: No data found for client " << client_id << " server " << server_id << std::endl;
-        return std::vector<int>();
+        return std::vector<WeightedInput>();
     }
     
     // 获取预期交集大小（用于验证）
@@ -208,7 +236,7 @@ std::mutex GlobalDataManager::instance_mutex;
 // 新增：Client数据提供者
 class ClientDataProvider {
 private:
-    std::vector<int> input_set;
+    std::vector<WeightedInput> input_set;
     
 public:
     ClientDataProvider(int client_id, int server_id) {
@@ -216,7 +244,7 @@ public:
         input_set = manager->get_client_data(client_id, server_id);
     }
     
-    std::vector<int> get_input_set() const {
+    std::vector<WeightedInput> get_input_set() const {
         return input_set;
     }
 };
