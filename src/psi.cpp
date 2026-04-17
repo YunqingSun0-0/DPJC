@@ -445,7 +445,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     return psi_ca / get_config().mom_kk;
 }
 
-int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if(get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -491,10 +491,12 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
     std::unordered_map<uint64_t, Ciphertext> t_map;
     std::stack<std::pair<int, Ciphertext>> t_stack_in;
     std::vector<Ciphertext> calc_prg(config.prg_dd);
-
+    
     auto t_start_loop = std::chrono::high_resolution_clock::now();
-    for(auto & item : input_set) {
-        std::vector<int> ids = aes_gen.get_id_group(0, item);
+    std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
+    Plaintext weight_plain;
+    for(const auto& item : input_set) {
+        std::vector<int> ids = aes_gen.get_id_group(0, item.value);
         sort(ids.begin(), ids.end());
         for(int i = 0; i < config.prg_dd; i+=2) {
             if(i + 1 == config.prg_dd) {
@@ -512,10 +514,20 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<int>& input_s
                 }
             }
         }
-        // if(!get_config().test_mode) {
-        //     Decryptor decryptor_noise_budget(context, sk_noise_budget);
-        //     std::cerr << "noise budget - multiply 1: " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
-        // }
+        if (item.weight != 1) {
+            std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
+            ASSERT_MSG(item.weight > 0, "weight must be a positive integer");
+            uint64_t encoded_weight = static_cast<uint64_t>(item.weight);
+            for (int round = 0; round < tot_rounds; ++round) {
+                weight_slots[round] = encoded_weight;
+            }
+            batch_encoder.encode(weight_slots, weight_plain);
+            evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+        }
+        if(!get_config().test_mode) {
+            Decryptor decryptor_noise_budget(context, sk_noise_budget);
+            std::cerr << "noise budget - multiply 1: " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
+        }
         for(int w = 2; w < config.prg_dd; w <<= 1) {
             for(int i = 0; i < config.prg_dd; i += (w<<1)) {
                 if(i + w < config.prg_dd) {
@@ -692,8 +704,8 @@ int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>&
     }
 }
 
-int psi_client_naive(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
-    if (get_config().test_mode) {
+int psi_client_naive(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+    if(get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
         get_config().prg_seed = prg_seed;
@@ -730,9 +742,9 @@ int psi_client_naive(int client_id, int server_id, const std::vector<int>& input
 
     AESGen aes_gen(0);
     for (size_t idx = 0; idx < input_set.size(); ++idx) {
-        const int item = input_set[idx];
+        const auto item = input_set[idx];
 
-        std::vector<int> ids = aes_gen.get_id_group(0, item);
+        std::vector<int> ids = aes_gen.get_id_group(0, item.value);
         std::sort(ids.begin(), ids.end());
 
         global_ids_count[make_sig(ids)]++;
@@ -747,7 +759,7 @@ int psi_client_naive(int client_id, int server_id, const std::vector<int>& input
             for (int i = 0; i < config.prg_dd; ++i) {
                 contribution ^= row_ptrs[i][round];
             }
-            result[round] += contribution ? -1 : 1;
+            result[round] += contribution ? -item.weight : item.weight;
         }
     }
 
@@ -854,7 +866,7 @@ int psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<emp::
     }
 }
 
-int psi_client_naive_uniform(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+int psi_client_naive_uniform(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if (get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -876,7 +888,8 @@ int psi_client_naive_uniform(int client_id, int server_id, const std::vector<int
     emp::PRG prg(&seed_block);
     emp::block tmp[BATCH];
     for (size_t idx = 0; idx < input_set.size(); ++idx) {
-        uint64_t item_u64 = (uint64_t)(uint32_t)input_set[idx];
+        uint64_t item_u64 = (uint64_t)(uint32_t)input_set[idx].value;
+        const int64_t weight = input_set[idx].weight;
 
         int round = 0;
         for (; round + BATCH <= tot_rounds; round += BATCH) {
@@ -890,7 +903,7 @@ int psi_client_naive_uniform(int client_id, int server_id, const std::vector<int
 
             // 累加结果
             for (int j = 0; j < BATCH; ++j) {
-                result[round + j] += bool_to_pm1_from_block(tmp[j]);
+                result[round + j] += weight * bool_to_pm1_from_block(tmp[j]);
             }
         }
 
@@ -904,7 +917,7 @@ int psi_client_naive_uniform(int client_id, int server_id, const std::vector<int
             emp::AES_ecb_encrypt_blks(tmp, remain, &prg.aes);
 
             for (int j = 0; j < remain; ++j) {
-                result[round + j] += bool_to_pm1_from_block(tmp[j]);
+                result[round + j] += weight * bool_to_pm1_from_block(tmp[j]);
             }
         }
     }
@@ -1019,7 +1032,7 @@ int psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<emp:
     }
 }
 
-int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if (get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -1062,8 +1075,11 @@ int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<in
     // -------- Step 2: items 转连续 uint64_t --------
     std::vector<uint64_t> items;
     items.reserve(input_set.size());
-    for (int item : input_set) {
-        items.push_back(mod_p((uint64_t)(uint32_t)item + 1ULL));
+    std::vector<int64_t> weights;
+    weights.reserve(input_set.size());
+    for (const auto& item : input_set) {
+        items.push_back(mod_p((uint64_t)(uint32_t)item.value + 1ULL));
+        weights.push_back(item.weight);
     }
 
     std::vector<int64_t> result(tot_rounds, 0);
@@ -1075,6 +1091,7 @@ int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<in
     // -------- Step 3: over items 累加 --------
     for (size_t idx = 0; idx < items.size(); ++idx) {
         const uint64_t x = items[idx];
+        const int64_t weight = weights[idx];
 
         for (int base = 0; base < tot_rounds; base += TILE) {
             const int end = std::min(base + TILE, tot_rounds);
@@ -1099,20 +1116,20 @@ int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<in
                 uint64_t v6 = eval_deg3_horner(x, a6.c0, a6.c1, a6.c2, a6.c3);
                 uint64_t v7 = eval_deg3_horner(x, a7.c0, a7.c1, a7.c2, a7.c3);
 
-                result[round + 0] += 1 - 2 * (int64_t)(v0 & 1ULL);
-                result[round + 1] += 1 - 2 * (int64_t)(v1 & 1ULL);
-                result[round + 2] += 1 - 2 * (int64_t)(v2 & 1ULL);
-                result[round + 3] += 1 - 2 * (int64_t)(v3 & 1ULL);
-                result[round + 4] += 1 - 2 * (int64_t)(v4 & 1ULL);
-                result[round + 5] += 1 - 2 * (int64_t)(v5 & 1ULL);
-                result[round + 6] += 1 - 2 * (int64_t)(v6 & 1ULL);
-                result[round + 7] += 1 - 2 * (int64_t)(v7 & 1ULL);
+                result[round + 0] += weight * (1 - 2 * (int64_t)(v0 & 1ULL));
+                result[round + 1] += weight * (1 - 2 * (int64_t)(v1 & 1ULL));
+                result[round + 2] += weight * (1 - 2 * (int64_t)(v2 & 1ULL));
+                result[round + 3] += weight * (1 - 2 * (int64_t)(v3 & 1ULL));
+                result[round + 4] += weight * (1 - 2 * (int64_t)(v4 & 1ULL));
+                result[round + 5] += weight * (1 - 2 * (int64_t)(v5 & 1ULL));
+                result[round + 6] += weight * (1 - 2 * (int64_t)(v6 & 1ULL));
+                result[round + 7] += weight * (1 - 2 * (int64_t)(v7 & 1ULL));
             }
 
             for (; round < end; ++round) {
                 const Deg3Coeff& a = coeffs[round];
                 uint64_t v = eval_deg3_horner(x, a.c0, a.c1, a.c2, a.c3);
-                result[round] += 1 - 2 * (int64_t)(v & 1ULL);
+                result[round] += weight * (1 - 2 * (int64_t)(v & 1ULL));
             }
         }
     }
@@ -1132,7 +1149,7 @@ int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<in
 
 // 函数指针类型定义
 using PsiServerFunc = int(*)(int, emp::NetIO*, std::vector<emp::NetIO*>&);
-using PsiClientFunc = int(*)(int, int, const std::vector<int>&, emp::NetIO*);
+using PsiClientFunc = int(*)(int, int, const std::vector<WeightedInput>&, emp::NetIO*);
 
 // 注册表
 static std::unordered_map<std::string, PsiServerFunc> server_registry;
@@ -1159,7 +1176,7 @@ int psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& clien
     return server_registry[mode](party, server_io, client_connections);
 }
 
-int psi_client(int client_id, int server_id, const std::vector<int>& input_set, emp::NetIO* io) {
+int psi_client(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     const GlobalConfig& config = get_config();
     std::string mode = config.psi_mode;
     

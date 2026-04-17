@@ -12,13 +12,16 @@ import time
 import signal
 import shutil
 import re
+import threading
+import argparse
 
 # ==================== CONFIGURABLE PARAMETERS ====================
 # Test parameters - Optimized for speed
 UNIVERSAL_SIZE_BIT = 24  # Reduced for faster testing
 SET_SIZE = 2**10  # Reduced for faster testing
 INTERSECTION_SIZE = SET_SIZE // 2  # Reduced for faster testing
-NUM_CLIENTS_PER_SERVER = 1  # Reduced for faster testing
+NUM_CLIENTS_PER_SERVER = 2  # Reduced for faster testing
+GENDATA_INPUT_FILE = "./uci_words/docword.nips.txt"  # e.g. "./uci_words/docword.kos.txt"; empty means random generation
 OUTPUT_DIR = "./test_naive_data_fast"
 PORT = 20930  # Different port to avoid conflicts
 MOM_K = 2500
@@ -27,7 +30,8 @@ MOM_T = 11
 # Test parameters
 VERBOSE = True
 CLEANUP_AFTER_TEST = True
-TIMEOUT_SECONDS = 5  # Reduced timeout
+TIMEOUT_SECONDS = 10  # Reduced timeout
+STREAM_PROCESS_OUTPUT = False  # Show server/client output in terminal for debugging
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -80,13 +84,39 @@ def run_command(cmd, description=""):
         log(f"✗ {description or cmd} failed with exception: {e}", "ERROR")
         return False, str(e)
 
-def read_set_from_file(filename):
-    """Read a set from file"""
+def read_weighted_set_from_file(filename):
+    """Read a weighted set from file as value -> weight."""
     if not os.path.exists(filename):
-        return set()
+        return {}
     
     with open(filename, 'r') as f:
-        return set(int(line.strip()) for line in f if line.strip())
+        values = {}
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            value = int(parts[0])
+            weight = int(parts[1]) if len(parts) > 1 else 1
+            values[value] = weight
+        return values
+
+def merge_weighted_sets(weighted_sets):
+    """Merge multiple client sets into one value -> summed weight map."""
+    merged = {}
+    for weighted_set in weighted_sets:
+        for value, weight in weighted_set.items():
+            merged[value] = merged.get(value, 0) + weight
+    return merged
+
+def compute_weighted_intersection_sum(server1_weights, server2_weights):
+    """Compute sum of weight products over the shared values."""
+    total = 0
+    for value, weight1 in server1_weights.items():
+        weight2 = server2_weights.get(value)
+        if weight2 is not None:
+            total += weight1 * weight2
+    return total
 
 # def start_process(cmd, description):
 #     """Start a process in background"""
@@ -188,6 +218,8 @@ def generate_test_data():
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
           f"--set_size={SET_SIZE} " \
           f"--output_dir={OUTPUT_DIR}"
+    if GENDATA_INPUT_FILE:
+        cmd += f" --uci_data_file={GENDATA_INPUT_FILE}"
     
     success, output = run_command(cmd, "Data generation")
     if not success:
@@ -204,27 +236,19 @@ def generate_test_data():
             log(f"Error: Generated data file not found: {file}", "ERROR")
             return False, None, None, None
     
-    # Read all sets and calculate expected intersection
-    server1_sets = [read_set_from_file(f) for f in server1_files]
-    server2_sets = [read_set_from_file(f) for f in server2_files]
-    
-    # Calculate intersection across all clients
-    all_server1_elements = set()
-    all_server2_elements = set()
-    
-    for s in server1_sets:
-        all_server1_elements.update(s)
-    for s in server2_sets:
-        all_server2_elements.update(s)
-    
-    expected_intersection = all_server1_elements.intersection(all_server2_elements)
-    expected_intersection_size = len(expected_intersection)
-    
-    log(f"Server 1 total elements: {len(all_server1_elements)}")
-    log(f"Server 2 total elements: {len(all_server2_elements)}")
-    log(f"Expected intersection size: {expected_intersection_size}")
-    
-    return True, server1_files, server2_files, expected_intersection_size
+    # Read all sets and calculate expected weighted intersection sum
+    server1_sets = [read_weighted_set_from_file(f) for f in server1_files]
+    server2_sets = [read_weighted_set_from_file(f) for f in server2_files]
+
+    all_server1_weights = merge_weighted_sets(server1_sets)
+    all_server2_weights = merge_weighted_sets(server2_sets)
+    expected_intersection_sum = compute_weighted_intersection_sum(all_server1_weights, all_server2_weights)
+
+    log(f"Server 1 total elements: {len(all_server1_weights)}")
+    log(f"Server 2 total elements: {len(all_server2_weights)}")
+    log(f"Expected weighted intersection sum: {expected_intersection_sum}")
+
+    return True, server1_files, server2_files, expected_intersection_sum
 
 def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     """Run PSI test with servers and clients"""
@@ -233,8 +257,8 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     log("=" * 50)
     
     # Start servers
-    server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
-    server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode={psi_mode}  --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
     
     server1_process = start_process(server1_cmd, "Server 1")
     server2_process = start_process(server2_cmd, "Server 2")
@@ -246,7 +270,7 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"./bin/psi_client -p {client_id} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./bin/psi_client -p {client_id} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -254,7 +278,7 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
 
@@ -308,10 +332,10 @@ def validate_results(expected_size, actual_size):
     tolerance = max(1, expected_size // 10)  # 10% tolerance
     
     if abs(actual_size - expected_size) > tolerance:
-        log(f"✗ Intersection size mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
+        log(f"✗ Weighted intersection sum mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
         return False
     else:
-        log(f"✓ Intersection size is correct (within tolerance)")
+        log(f"✓ Weighted intersection sum is correct (within tolerance)")
         log(f"  Expected: {expected_size}, Actual: {actual_size}")
         return True
 

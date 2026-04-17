@@ -24,7 +24,8 @@ import argparse
 UNIVERSAL_SIZE_BIT = 24
 SET_SIZE = 1 << 18  # 2^18
 INTERSECTION_SIZE = SET_SIZE // 2  # Half of set size
-NUM_CLIENTS_PER_SERVER = 1
+NUM_CLIENTS_PER_SERVER = 4
+GENDATA_INPUT_FILE = "./uci_words/docword.nips.txt"  # e.g. "./uci_words/docword.kos.txt"; empty means random generation
 PORT_BASE = 21000  # Base port for tests
 
 # Parameter ranges by mode
@@ -278,6 +279,40 @@ def run_command(cmd, description=""):
         log(f"✗ {description or cmd} failed with exception: {e}", "ERROR")
         return False, str(e)
 
+def read_weighted_set_from_file(filename):
+    """Read a weighted set from file as value -> weight."""
+    if not os.path.exists(filename):
+        return {}
+
+    values = {}
+    with open(filename, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            value = int(parts[0])
+            weight = int(parts[1]) if len(parts) > 1 else 1
+            values[value] = weight
+    return values
+
+def merge_weighted_sets(weighted_sets):
+    """Merge multiple client sets into one value -> summed weight map."""
+    merged = {}
+    for weighted_set in weighted_sets:
+        for value, weight in weighted_set.items():
+            merged[value] = merged.get(value, 0) + weight
+    return merged
+
+def compute_weighted_intersection_sum(server1_weights, server2_weights):
+    """Compute sum of weight products over the shared values."""
+    total = 0
+    for value, weight1 in server1_weights.items():
+        weight2 = server2_weights.get(value)
+        if weight2 is not None:
+            total += weight1 * weight2
+    return total
+
 def start_process(cmd, description):
     """Start a process in background"""
     log(f"Starting {description}")
@@ -331,6 +366,8 @@ def generate_test_data(test_id, prg_dd, mom_k):
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
           f"--set_size={SET_SIZE} " \
           f"--output_dir={test_data_dir}"
+    if GENDATA_INPUT_FILE:
+        cmd += f" --uci_data_file={GENDATA_INPUT_FILE}"
     
     success, output = run_command(cmd, f"Data generation for test {test_id}")
     if not success:
@@ -347,29 +384,19 @@ def generate_test_data(test_id, prg_dd, mom_k):
             log(f"Error: Generated data file not found: {file}", "ERROR")
             return False, None
     
-    # Read all sets and calculate expected intersection
+    # Read all sets and calculate expected weighted intersection sum
     server1_sets = []
     server2_sets = []
     
     for f in server1_files:
-        with open(f, 'r') as file:
-            server1_sets.append(set(int(line.strip()) for line in file if line.strip()))
+        server1_sets.append(read_weighted_set_from_file(f))
     
     for f in server2_files:
-        with open(f, 'r') as file:
-            server2_sets.append(set(int(line.strip()) for line in file if line.strip()))
-    
-    # Calculate intersection across all clients
-    all_server1_elements = set()
-    all_server2_elements = set()
-    
-    for s in server1_sets:
-        all_server1_elements.update(s)
-    for s in server2_sets:
-        all_server2_elements.update(s)
-    
-    expected_intersection = all_server1_elements.intersection(all_server2_elements)
-    expected_intersection_size = len(expected_intersection)
+        server2_sets.append(read_weighted_set_from_file(f))
+
+    all_server1_weights = merge_weighted_sets(server1_sets)
+    all_server2_weights = merge_weighted_sets(server2_sets)
+    expected_intersection_size = compute_weighted_intersection_sum(all_server1_weights, all_server2_weights)
     
     return True, {
         'test_data_dir': test_data_dir,
@@ -399,6 +426,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
     server1_cmd = (
         f"./bin/psi_server -p 1 --port={port} --psi_mode={psi_mode} "
         f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode "
+        f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
         f"--mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
         f"{seed_arg}"
     )
@@ -406,6 +434,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
     server2_cmd = (
         f"./bin/psi_server -p 2 --port={port} --psi_mode={psi_mode} "
         f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode "
+        f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
         f"--mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
         f"{seed_arg}"
     )
@@ -426,6 +455,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
         client_cmd = (
             f"./bin/psi_client -p {client_id} --port={port} --data_file={data_file} "
             f"--psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} "
+            f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
             f"--test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
             f"{seed_arg}"
         )
@@ -439,6 +469,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
         client_cmd = (
             f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} --data_file={data_file} "
             f"--psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} "
+            f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
             f"--test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
             f"{seed_arg}"
         )

@@ -25,7 +25,7 @@ void run_client(int client_id, int server_id, const std::string& data_file = "")
     emp::NetIO* client_io = new emp::NetIO("127.0.0.1", real_port);
     
     // 获取client的输入集合
-    std::vector<int> input_set;
+    std::vector<WeightedInput> input_set;
     
     if (!data_file.empty()) {
         // 使用文件数据

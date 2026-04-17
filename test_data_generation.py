@@ -1,3 +1,5 @@
+# not usable
+
 #!/usr/bin/env python3
 """
 Test script for data generation validation
