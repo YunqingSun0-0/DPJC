@@ -18,7 +18,6 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datetime import datetime
 import argparse
-from pathlib import Path
 
 # ==================== CONFIGURABLE PARAMETERS ====================
 # Fixed parameters
@@ -83,15 +82,6 @@ BASE_RUN_DIR = f"./experiments/run_{RUN_TIMESTAMP}"
 RESULTS_DIR = os.path.join(BASE_RUN_DIR, "results")
 DATA_DIR = os.path.join(BASE_RUN_DIR, "data")
 PLOTS_DIR = os.path.join(BASE_RUN_DIR, "plots")
-SCRIPT_DIR = Path(__file__).resolve().parent
-BIN_DIR = SCRIPT_DIR / "bin"
-
-def repo_path(path_str):
-    """Resolve a repo-relative path while preserving absolute paths."""
-    if not path_str:
-        return ""
-    path = Path(path_str)
-    return str(path if path.is_absolute() else SCRIPT_DIR / path)
 
 def set_run_directory(run_dir):
     """Set the run directory and update all related paths"""
@@ -275,14 +265,7 @@ def run_command(cmd, description=""):
     """Run a command and return success status"""
     log(f"Running: {description or cmd}")
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-            cwd=SCRIPT_DIR,
-        )
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
         if result.returncode == 0:
             log(f"✓ {description or cmd} completed successfully")
             return True, result.stdout
@@ -338,8 +321,7 @@ def start_process(cmd, description):
         shell=True, 
         stdout=subprocess.PIPE, 
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-        cwd=SCRIPT_DIR,
+        preexec_fn=os.setsid
     )
     time.sleep(0.2)
     return process

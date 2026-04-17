@@ -14,7 +14,6 @@ import shutil
 import re
 import threading
 import argparse
-from pathlib import Path
 
 # ==================== CONFIGURABLE PARAMETERS ====================
 # Test parameters - Optimized for speed
@@ -33,16 +32,6 @@ VERBOSE = True
 CLEANUP_AFTER_TEST = True
 TIMEOUT_SECONDS = 10  # Reduced timeout
 STREAM_PROCESS_OUTPUT = False  # Show server/client output in terminal for debugging
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-BIN_DIR = SCRIPT_DIR / "bin"
-
-def repo_path(path_str):
-    """Resolve a repo-relative path while preserving absolute paths."""
-    if not path_str:
-        return ""
-    path = Path(path_str)
-    return str(path if path.is_absolute() else SCRIPT_DIR / path)
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -81,14 +70,7 @@ def run_command(cmd, description=""):
     """Run a command and return success status"""
     log(f"Running: {description or cmd}")
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-            cwd=SCRIPT_DIR,
-        )
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
         if result.returncode == 0:
             log(f"✓ {description or cmd} completed successfully")
             return True, result.stdout
@@ -158,8 +140,7 @@ def start_process(cmd, name):
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        preexec_fn=os.setsid,
-        cwd=SCRIPT_DIR,
+        preexec_fn=os.setsid
     )
 
     process._stdout_lines = []
@@ -228,26 +209,25 @@ def generate_test_data():
     log("=" * 50)
     
     # Clean up previous test data
-    output_dir = repo_path(OUTPUT_DIR)
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
+    if os.path.exists(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
     
     # Generate test data
-    cmd = f"{BIN_DIR / 'gendata'} --intersection_size={INTERSECTION_SIZE} " \
+    cmd = f"./bin/gendata --intersection_size={INTERSECTION_SIZE} " \
           f"--universal_size_bit={UNIVERSAL_SIZE_BIT} " \
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
           f"--set_size={SET_SIZE} " \
-          f"--output_dir={output_dir}"
+          f"--output_dir={OUTPUT_DIR}"
     if GENDATA_INPUT_FILE:
-        cmd += f" --uci_data_file={repo_path(GENDATA_INPUT_FILE)}"
+        cmd += f" --uci_data_file={GENDATA_INPUT_FILE}"
     
     success, output = run_command(cmd, "Data generation")
     if not success:
         return False, None, None, None
     
     # Read expected intersection from generated data
-    server1_files = [str(Path(output_dir) / f"client{i}_1.txt") for i in range(1, NUM_CLIENTS_PER_SERVER + 1)]
-    server2_files = [str(Path(output_dir) / f"client{i}_2.txt") for i in range(1, NUM_CLIENTS_PER_SERVER + 1)]
+    server1_files = [f"{OUTPUT_DIR}/client{i}_1.txt" for i in range(1, NUM_CLIENTS_PER_SERVER + 1)]
+    server2_files = [f"{OUTPUT_DIR}/client{i}_2.txt" for i in range(1, NUM_CLIENTS_PER_SERVER + 1)]
     
     # Check if all files exist
     all_files = server1_files + server2_files
@@ -277,8 +257,8 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     log("=" * 50)
     
     # Start servers
-    server1_cmd = f"{BIN_DIR / 'psi_server'} -p 1 --port={PORT} --psi_mode={psi_mode}  --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
-    server2_cmd = f"{BIN_DIR / 'psi_server'} -p 2 --port={PORT} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode={psi_mode}  --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+    server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
     
     server1_process = start_process(server1_cmd, "Server 1")
     server2_process = start_process(server2_cmd, "Server 2")
@@ -290,7 +270,7 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"{BIN_DIR / 'psi_client'} -p {client_id} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./bin/psi_client -p {client_id} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -298,7 +278,7 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"{BIN_DIR / 'psi_client'} -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
+        client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --universal_set_size_bit={UNIVERSAL_SIZE_BIT} --test_mode --mom_k={MOM_K} --mom_t={MOM_T}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
 
@@ -370,7 +350,7 @@ def test_naive_psi():
     log("Starting fast naive PSI test...")
     
     # Check if executables exist
-    required_files = [str(BIN_DIR / "gendata"), str(BIN_DIR / "psi_server"), str(BIN_DIR / "psi_client")]
+    required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
     for file in required_files:
         if not os.path.exists(file):
             log(f"Error: {file} not found. Please build the project first.", "ERROR")
@@ -403,7 +383,7 @@ def test_naive_uniform_psi():
     log("Starting fast naive_uniform PSI test...")
     
     # Check if executables exist
-    required_files = [str(BIN_DIR / "gendata"), str(BIN_DIR / "psi_server"), str(BIN_DIR / "psi_client")]
+    required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
     for file in required_files:
         if not os.path.exists(file):
             log(f"Error: {file} not found. Please build the project first.", "ERROR")
@@ -436,7 +416,7 @@ def test_naive_fourwise_psi():
     log("Starting fast naive_uniform PSI test...")
     
     # Check if executables exist
-    required_files = [str(BIN_DIR / "gendata"), str(BIN_DIR / "psi_server"), str(BIN_DIR / "psi_client")]
+    required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
     for file in required_files:
         if not os.path.exists(file):
             log(f"Error: {file} not found. Please build the project first.", "ERROR")
