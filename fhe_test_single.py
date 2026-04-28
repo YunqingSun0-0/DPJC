@@ -21,6 +21,7 @@ UNIVERSAL_SIZE_BIT = 24  # Small for quick testing
 SET_SIZE = None  # Will be set by command-line argument or default
 LOG_FILE = None  # Will be set based on set size
 INTERSECTION_SIZE = None  # Will be set by command-line argument or default
+MAX_WEIGHT = 0  # 0 = no weights (default); >0 = uniform random weights in [1, MAX_WEIGHT]
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
@@ -200,6 +201,8 @@ def generate_test_data():
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
           f"--set_size={SET_SIZE} " \
           f"--output_dir={OUTPUT_DIR}"
+    if MAX_WEIGHT > 0:
+        cmd += f" --max_weight={MAX_WEIGHT}"
     
     success, output = run_command(cmd, "Data generation")
     if not success:
@@ -421,7 +424,7 @@ def test_fhe_psi(seed_size_bit):
 
 def main():
     """Main function"""
-    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE
+    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE, MAX_WEIGHT
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -433,6 +436,9 @@ def main():
                        help='Seed size as power of 2 (e.g., 6 for 2^6 = 64 bits)')
     parser.add_argument('--num_clients_per_server', type=int, default=1,
                        help='Number of clients connected to each server (default: 1)')
+    parser.add_argument('--max_weight', type=int, default=0,
+                       help='If >0, gendata assigns each element a uniform random weight in [1, max_weight]. '
+                            'Default 0 = no weight column (unweighted).')
     parser.add_argument('--output_log', type=str, default=None,
                        help='Output log file (default: fhe_test_<set_size_bit>.log)')
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -445,6 +451,7 @@ def main():
     INTERSECTION_SIZE = SET_SIZE // 2
     PRG_DD = args.prg_dd
     NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
+    MAX_WEIGHT = args.max_weight
     VERBOSE = args.verbose
     
     if args.output_log:
@@ -461,6 +468,7 @@ def main():
     log(f"PRG DD: {PRG_DD}")
     log(f"Clients per server: {NUM_CLIENTS_PER_SERVER}")
     log(f"Total clients: {2 * NUM_CLIENTS_PER_SERVER}")
+    log(f"Max weight: {MAX_WEIGHT} ({'unweighted' if MAX_WEIGHT == 0 else f'random in [1, {MAX_WEIGHT}]'})")
     log(f"Logging to: {LOG_FILE}")
     
     # Run single correctness test

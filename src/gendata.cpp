@@ -432,6 +432,8 @@ void print_usage(const char* program_name) {
               << "  --output_dir=<dir>           Output directory for files (default: ./data)\n"
               << "  --uci_data_file=<path>       Use a UCI Bag-of-Words file instead of random generation\n"
               << "  --random_seed=<n>            Optional deterministic seed for sampling\n"
+              << "  --max_weight=<n>             Random mode: assign each element a uniform weight in [1, n]\n"
+              << "                               (default 0 = no weight column, same as before)\n"
               << "  --network_mode=<lan|wan>     LAN (default, single host) or WAN (Server1 generates and sends to Server2)\n"
               << "  -p <1|2>                     For --network_mode=wan: which server is this process\n"
               << "  --port=<n>                   WAN transfer port (default: 23000)\n"
@@ -446,6 +448,7 @@ int main(int argc, char** argv) {
     int set_size = 600;
     std::string output_dir = "./data";
     std::string uci_data_file;
+    int max_weight = 0;  // 0 = no weights (current default)
     uint64_t random_seed = std::chrono::system_clock::now().time_since_epoch().count();
     // WAN-mode-only args (LAN mode ignores these)
     std::string network_mode = "lan";
@@ -485,6 +488,8 @@ int main(int argc, char** argv) {
             uci_data_file = val;
         } else if (auto val = get_value("--random_seed="); !val.empty()) {
             random_seed = std::stoull(val);
+        } else if (auto val = get_value("--max_weight="); !val.empty()) {
+            max_weight = std::stoi(val);
         } else if (auto val = get_value("--network_mode="); !val.empty()) {
             network_mode = val;
         } else if (auto val = get_value("--port="); !val.empty()) {
@@ -649,22 +654,60 @@ int main(int argc, char** argv) {
     // 将集合分配给clients
     auto client_sets_1 = distribute_set_to_clients(set1, num_clients_per_server);
     auto client_sets_2 = distribute_set_to_clients(set2, num_clients_per_server);
-    
+
+    if (max_weight < 0) {
+        std::cerr << "Error: --max_weight must be non-negative" << std::endl;
+        return 1;
+    }
+
+    int64_t weighted_intersection_sum = 0;
+    bool emit_weights = max_weight > 0;
+    std::vector<std::vector<WeightedWord>> weighted_sets_1, weighted_sets_2;
+
+    if (emit_weights) {
+        std::uniform_int_distribution<int> weight_dist(1, max_weight);
+        weighted_sets_1.resize(num_clients_per_server);
+        weighted_sets_2.resize(num_clients_per_server);
+        for (int i = 0; i < num_clients_per_server; ++i) {
+            weighted_sets_1[i].reserve(client_sets_1[i].size());
+            for (int v : client_sets_1[i]) {
+                weighted_sets_1[i].push_back({v, weight_dist(rng)});
+            }
+            weighted_sets_2[i].reserve(client_sets_2[i].size());
+            for (int v : client_sets_2[i]) {
+                weighted_sets_2[i].push_back({v, weight_dist(rng)});
+            }
+        }
+        auto merged1 = aggregate_weights(weighted_sets_1);
+        auto merged2 = aggregate_weights(weighted_sets_2);
+        weighted_intersection_sum = compute_weighted_intersection_sum(merged1, merged2);
+        std::cout << "  Max weight: " << max_weight << "\n"
+                  << "  Weighted intersection sum: " << weighted_intersection_sum << "\n";
+    }
+
     // 写入文件模式
     std::cout << "Writing data to files:\n";
-    
+
     // Server 1的clients
     for (int i = 0; i < num_clients_per_server; ++i) {
         std::string filename = output_dir + "/client" + std::to_string(1 + i) + "_1.txt";
-        write_set_to_file(client_sets_1[i], filename);
+        if (emit_weights) {
+            write_weighted_set_to_file(weighted_sets_1[i], filename);
+        } else {
+            write_set_to_file(client_sets_1[i], filename);
+        }
     }
-    
+
     // Server 2的clients
     for (int i = 0; i < num_clients_per_server; ++i) {
         std::string filename = output_dir + "/client" + std::to_string(1 + i) + "_2.txt";
-        write_set_to_file(client_sets_2[i], filename);
+        if (emit_weights) {
+            write_weighted_set_to_file(weighted_sets_2[i], filename);
+        } else {
+            write_set_to_file(client_sets_2[i], filename);
+        }
     }
-    
+
     // 写入配置文件
     std::ofstream config_file(output_dir + "/config.txt");
     config_file << "mode=random\n";
@@ -674,6 +717,10 @@ int main(int argc, char** argv) {
     config_file << "num_clients_per_server=" << num_clients_per_server << "\n";
     config_file << "set_size=" << set_size << "\n";
     config_file << "actual_intersection_size=" << actual_intersection.size() << "\n";
+    config_file << "max_weight=" << max_weight << "\n";
+    if (emit_weights) {
+        config_file << "weighted_intersection_sum=" << weighted_intersection_sum << "\n";
+    }
     config_file.close();
     
     std::cout << "Configuration written to " << output_dir << "/config.txt\n";
