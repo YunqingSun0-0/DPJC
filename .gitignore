@@ -16,3 +16,4 @@ __pycache__/
 experiments/
 test_naive_data/
 uci_words/
+fhe_phase/

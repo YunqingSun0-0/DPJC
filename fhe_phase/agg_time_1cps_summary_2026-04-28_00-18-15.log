@@ -1,9 +1,0 @@
-[INFO] Full log: /home/ysk3460/psi-code/fhe_phase/agg_time_1cps_full_2026-04-28_00-18-15.log
-[INFO] Summary log: /home/ysk3460/psi-code/fhe_phase/agg_time_1cps_summary_2026-04-28_00-18-15.log
-[INFO] Config: clients_per_side=1, total_clients=2, set_size=2^0, prg_dd=6
-[INFO] Seed bits: 6
-
-[RUN] seed_size=2^6
-[OK] seed=2^6 aggregation_time: server1=0.085ms, server2=0.04ms, total=.125ms
-
-[DONE] Finished. See summary: /home/ysk3460/psi-code/fhe_phase/agg_time_1cps_summary_2026-04-28_00-18-15.log
