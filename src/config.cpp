@@ -24,6 +24,10 @@ void GlobalConfig::parse_args(int argc, char** argv) {
 
         if (auto val = get_value("--port="); !val.empty()) {
             port = std::stoi(val);
+        } else if (auto val = get_value("--server1_host="); !val.empty()) {
+            server1_host = val;
+        } else if (auto val = get_value("--server2_host="); !val.empty()) {
+            server2_host = val;
         } else if (auto val = get_value("--universal_set_size_bit="); !val.empty()) {
             universal_set_size_bit = std::stoi(val);
             universal_set_size = 1 << universal_set_size_bit;

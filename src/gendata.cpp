@@ -14,6 +14,14 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include <thread>
+#include <stdexcept>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 struct WeightedWord {
     int value = 0;
@@ -214,6 +222,206 @@ std::string join_doc_ids(const std::vector<int>& doc_ids) {
     return result;
 }
 
+// ==================== WAN distributed-data-generation (FHE only, non-weighted) ====================
+// PJC-derived WAN networking: Server 1 generates both sets, sends Set 2 to Server 2 over TCP.
+// Used by run_seed_tests.sh --mode wan and other FHE WAN tests. Non-weighted only in this build.
+
+struct TransferHeader {
+    int intersection_size;
+    int universal_size_bit;
+    int num_clients_per_server;
+    int set_size;
+    int actual_intersection_size;
+    int set2_size;
+};
+
+void send_all(int fd, const void* data, size_t size) {
+    const char* ptr = static_cast<const char*>(data);
+    while (size > 0) {
+        ssize_t sent = send(fd, ptr, size, 0);
+        if (sent <= 0) {
+            throw std::runtime_error("Socket send failed");
+        }
+        ptr += sent;
+        size -= static_cast<size_t>(sent);
+    }
+}
+
+void recv_all(int fd, void* data, size_t size) {
+    char* ptr = static_cast<char*>(data);
+    while (size > 0) {
+        ssize_t received = recv(fd, ptr, size, 0);
+        if (received <= 0) {
+            throw std::runtime_error("Socket receive failed");
+        }
+        ptr += received;
+        size -= static_cast<size_t>(received);
+    }
+}
+
+int create_server_socket(int port) {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        throw std::runtime_error("Failed to create server socket");
+    }
+    int opt = 1;
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        close(listen_fd);
+        throw std::runtime_error("Failed to set SO_REUSEADDR");
+    }
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(listen_fd);
+        throw std::runtime_error("Failed to bind server socket on port " + std::to_string(port));
+    }
+    if (listen(listen_fd, 1) < 0) {
+        close(listen_fd);
+        throw std::runtime_error("Failed to listen on server socket");
+    }
+    return listen_fd;
+}
+
+int accept_connection(int listen_fd) {
+    int conn_fd = accept(listen_fd, nullptr, nullptr);
+    if (conn_fd < 0) {
+        throw std::runtime_error("Failed to accept incoming WAN data connection");
+    }
+    return conn_fd;
+}
+
+int connect_to_server1(const std::string& host, int port) {
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        throw std::runtime_error("Invalid server1 host: " + host);
+    }
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd < 0) {
+            throw std::runtime_error("Failed to create client socket");
+        }
+        if (connect(sock_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            return sock_fd;
+        }
+        close(sock_fd);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    throw std::runtime_error(
+        "Failed to connect to server1 at " + host + ":" + std::to_string(port));
+}
+
+int compute_actual_intersection_size_int(const std::vector<int>& set1, const std::vector<int>& set2) {
+    std::set<int> set1_set(set1.begin(), set1.end());
+    std::set<int> set2_set(set2.begin(), set2.end());
+    std::vector<int> actual_intersection;
+    std::set_intersection(set1_set.begin(), set1_set.end(),
+                         set2_set.begin(), set2_set.end(),
+                         std::back_inserter(actual_intersection));
+    return static_cast<int>(actual_intersection.size());
+}
+
+// Write per-client non-weighted files, one element per line — matches PJC LAN/WAN format.
+void write_client_files_int(const std::vector<int>& set, int num_clients_per_server,
+                            int server_id, const std::string& output_dir) {
+    auto client_sets = distribute_set_to_clients<int>(set, num_clients_per_server);
+    for (int i = 0; i < num_clients_per_server; ++i) {
+        std::string filename = output_dir + "/client" + std::to_string(i + 1) + "_" +
+                               std::to_string(server_id) + ".txt";
+        write_set_to_file(client_sets[i], filename);
+        std::cout << "  Server " << server_id << " client " << (i + 1) << ": "
+                  << client_sets[i].size() << " elements written to " << filename << "\n";
+    }
+}
+
+void run_wan_mode_server1(int universal_size_bit, int intersection_size, int set_size,
+                          int num_clients_per_server, const std::string& output_dir,
+                          int port, uint64_t random_seed) {
+    int universal_size = 1 << universal_size_bit;
+    std::cout << "Generating WAN data on Server 1:\n"
+              << "  Universal size: 2^" << universal_size_bit << " = " << universal_size << "\n"
+              << "  Set size: " << set_size << "\n"
+              << "  Intersection size: " << intersection_size << "\n"
+              << "  Clients per server: " << num_clients_per_server << "\n"
+              << "  Output directory: " << output_dir << "\n"
+              << "  WAN transfer port: " << port << "\n\n";
+
+    std::filesystem::create_directories(output_dir);
+    std::mt19937 rng(static_cast<uint32_t>(random_seed));
+    auto [set1, set2] = generate_sets_with_intersection(universal_size, intersection_size, set_size, rng);
+    int actual_intersection_size = compute_actual_intersection_size_int(set1, set2);
+
+    std::cout << "Generated sets:\n"
+              << "  Set 1 size: " << set1.size() << "\n"
+              << "  Set 2 size: " << set2.size() << "\n"
+              << "  Actual intersection size: " << actual_intersection_size << "\n";
+
+    std::cout << "Writing Server 1 client data:\n";
+    write_client_files_int(set1, num_clients_per_server, 1, output_dir);
+
+    TransferHeader header {
+        intersection_size,
+        universal_size_bit,
+        num_clients_per_server,
+        set_size,
+        actual_intersection_size,
+        static_cast<int>(set2.size())
+    };
+
+    int listen_fd = create_server_socket(port);
+    std::cout << "Waiting for Server 2 to receive Set 2 on port " << port << std::endl;
+    int conn_fd = accept_connection(listen_fd);
+    send_all(conn_fd, &header, sizeof(header));
+    send_all(conn_fd, set2.data(), set2.size() * sizeof(int));
+    close(conn_fd);
+    close(listen_fd);
+
+    std::cout << "Sent Set 2 to Server 2\n";
+    std::cout << "\nWAN data generation completed successfully on Server 1!\n";
+}
+
+void run_wan_mode_server2(int universal_size_bit, int intersection_size, int set_size,
+                          int num_clients_per_server, const std::string& output_dir,
+                          int port, const std::string& server1_host) {
+    std::cout << "Receiving WAN data on Server 2:\n"
+              << "  Server 1 host: " << server1_host << "\n"
+              << "  WAN transfer port: " << port << "\n"
+              << "  Output directory: " << output_dir << "\n\n";
+
+    std::filesystem::create_directories(output_dir);
+    int sock_fd = connect_to_server1(server1_host, port);
+
+    TransferHeader header {};
+    recv_all(sock_fd, &header, sizeof(header));
+
+    if (header.num_clients_per_server != num_clients_per_server)
+        throw std::runtime_error("num_clients_per_server mismatch between Server 1 and Server 2");
+    if (header.set_size != set_size)
+        throw std::runtime_error("set_size mismatch between Server 1 and Server 2");
+    if (header.intersection_size != intersection_size)
+        throw std::runtime_error("intersection_size mismatch between Server 1 and Server 2");
+    if (header.universal_size_bit != universal_size_bit)
+        throw std::runtime_error("universal_size_bit mismatch between Server 1 and Server 2");
+
+    std::vector<int> set2(header.set2_size);
+    recv_all(sock_fd, set2.data(), set2.size() * sizeof(int));
+    close(sock_fd);
+
+    std::cout << "Received Set 2 from Server 1:\n"
+              << "  Set 2 size: " << set2.size() << "\n"
+              << "  Actual intersection size: " << header.actual_intersection_size << "\n";
+
+    std::cout << "Writing Server 2 client data:\n";
+    write_client_files_int(set2, num_clients_per_server, 2, output_dir);
+
+    std::cout << "\nWAN data generation completed successfully on Server 2!\n";
+}
+
+// ==================== End WAN block ====================
+
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [options]\n"
               << "Options:\n"
@@ -224,6 +432,10 @@ void print_usage(const char* program_name) {
               << "  --output_dir=<dir>           Output directory for files (default: ./data)\n"
               << "  --uci_data_file=<path>       Use a UCI Bag-of-Words file instead of random generation\n"
               << "  --random_seed=<n>            Optional deterministic seed for sampling\n"
+              << "  --network_mode=<lan|wan>     LAN (default, single host) or WAN (Server1 generates and sends to Server2)\n"
+              << "  -p <1|2>                     For --network_mode=wan: which server is this process\n"
+              << "  --port=<n>                   WAN transfer port (default: 23000)\n"
+              << "  --server1_host=<host>        For --network_mode=wan + Server 2: address of Server 1\n"
               << "  --help                       Show this help message\n";
 }
 
@@ -235,24 +447,31 @@ int main(int argc, char** argv) {
     std::string output_dir = "./data";
     std::string uci_data_file;
     uint64_t random_seed = std::chrono::system_clock::now().time_since_epoch().count();
-    
+    // WAN-mode-only args (LAN mode ignores these)
+    std::string network_mode = "lan";
+    int wan_port = 23000;
+    std::string server1_host = "127.0.0.1";
+    int wan_server_id = 0;
+
     // 解析命令行参数
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
-        
+
         if (arg == "--help") {
             print_usage(argv[0]);
             return 0;
         }
-        
+
         auto get_value = [&](const std::string& prefix) -> std::string {
             if (arg.substr(0, prefix.size()) == prefix) {
                 return arg.substr(prefix.size());
             }
             return "";
         };
-        
-        if (auto val = get_value("--intersection_size="); !val.empty()) {
+
+        if (arg == "-p" && i + 1 < argc) {
+            wan_server_id = std::atoi(argv[++i]);
+        } else if (auto val = get_value("--intersection_size="); !val.empty()) {
             intersection_size = std::stoi(val);
         } else if (auto val = get_value("--universal_size_bit="); !val.empty()) {
             universal_size_bit = std::stoi(val);
@@ -266,6 +485,12 @@ int main(int argc, char** argv) {
             uci_data_file = val;
         } else if (auto val = get_value("--random_seed="); !val.empty()) {
             random_seed = std::stoull(val);
+        } else if (auto val = get_value("--network_mode="); !val.empty()) {
+            network_mode = val;
+        } else if (auto val = get_value("--port="); !val.empty()) {
+            wan_port = std::stoi(val);
+        } else if (auto val = get_value("--server1_host="); !val.empty()) {
+            server1_host = val;
         } else {
             std::cerr << "Unknown argument: " << arg << std::endl;
             print_usage(argv[0]);
@@ -276,6 +501,31 @@ int main(int argc, char** argv) {
     if (num_clients_per_server <= 0) {
         std::cerr << "Error: num_clients_per_server must be positive" << std::endl;
         return 1;
+    }
+
+    // WAN mode dispatch (FHE-only, non-weighted in this build)
+    if (network_mode == "wan") {
+        if (wan_server_id != 1 && wan_server_id != 2) {
+            std::cerr << "Error: --network_mode=wan requires -p <1|2>" << std::endl;
+            return 1;
+        }
+        if (!uci_data_file.empty()) {
+            std::cerr << "Error: WAN mode does not support --uci_data_file (non-weighted only)" << std::endl;
+            return 1;
+        }
+        try {
+            if (wan_server_id == 1) {
+                run_wan_mode_server1(universal_size_bit, intersection_size, set_size,
+                                     num_clients_per_server, output_dir, wan_port, random_seed);
+            } else {
+                run_wan_mode_server2(universal_size_bit, intersection_size, set_size,
+                                     num_clients_per_server, output_dir, wan_port, server1_host);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "WAN gendata error: " << e.what() << std::endl;
+            return 1;
+        }
+        return 0;
     }
 
     std::mt19937 rng(static_cast<uint32_t>(random_seed));

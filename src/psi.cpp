@@ -14,7 +14,11 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
+#include <iomanip>
 #include <functional>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -22,6 +26,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <iostream>
+#include "oleu32.h"
 using namespace seal;
 using namespace emp;
 #include <array>
@@ -36,12 +41,14 @@ struct Deg3Coeff {
 static size_t total_communication_size = 0;
 
 template<typename T>
-void iosend(int party, emp::NetIO* io, const T& key) {
+void iosend(int party, emp::NetIO* io, const T& key, size_t* recorded_bytes = nullptr) {
     std::stringstream stream;
-    auto size = key.save(stream, compr_mode_type::zstd);
+    key.save(stream, compr_mode_type::zstd);
     string str = stream.str();
     size_t send_size = str.size();
-    if (party == 1) total_communication_size += sizeof(send_size) + send_size;
+    size_t bytes_with_header = sizeof(send_size) + send_size;
+    if (party == 1) total_communication_size += bytes_with_header;
+    if (recorded_bytes) *recorded_bytes = bytes_with_header;
     // std::cerr << "[Party " << party << "] Sent "<< typeid(T).name() << " bytes: " << send_size << std::endl;
     io->send_data(&send_size, sizeof(send_size));
     io->send_data(str.data(), send_size);
@@ -59,16 +66,82 @@ void iorecv(int party, emp::NetIO* io, const SEALContext& context, T& key) {
     // std::cerr << "[Party " << party << "] Received "<< typeid(T).name() << " bytes: " << recv_size << std::endl;
 }
 
+inline uint32_t reveal_share_u32_modp(uint32_t my_share, uint32_t p, int party, emp::NetIO* io) {
+    uint32_t other_share = 0;
+
+    if (party == ALICE) {
+        io->send_data(&my_share, sizeof(uint32_t));
+        io->recv_data(&other_share, sizeof(uint32_t));
+    } else {
+        io->recv_data(&other_share, sizeof(uint32_t));
+        io->send_data(&my_share, sizeof(uint32_t));
+    }
+    io->flush();
+
+    uint64_t s = (uint64_t)my_share + (uint64_t)other_share;
+    return (uint32_t)(s % p);
+}
+
+inline uint32_t add_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
+    uint64_t s = (uint64_t)a + (uint64_t)b;
+    return (uint32_t)(s % p);
+}
+
+inline uint32_t mul_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
+    uint64_t z = (uint64_t)a * (uint64_t)b;
+    return (uint32_t)(z % p);
+}
+
+Bit geq_unsigned(const Integer& a, const Integer& b);
+
 Integer mod_add(const Integer& a, const Integer& b, const Integer& p) {
-    Integer sum = a + b;
-    Bit over = sum >= p;
-    return If(over, sum - p, sum);
+    // Do unsigned modular addition in widened domain to avoid signed overflow.
+    const size_t base_len = std::max({a.size(), b.size(), p.size()});
+    const size_t wide_len = base_len + 2;
+
+    Integer a_wide = a;
+    Integer b_wide = b;
+    Integer p_wide = p;
+    a_wide.resize(wide_len, false);
+    b_wide.resize(wide_len, false);
+    p_wide.resize(wide_len, false);
+
+    Integer sum = a_wide + b_wide;
+    Bit over = geq_unsigned(sum, p_wide);
+    Integer reduced = If(over, sum - p_wide, sum);
+    reduced.resize(base_len, false);
+    return reduced;
 }
 
 Integer mod_mul(const Integer& a, const Integer& b, const Integer& p) {
-    Integer product = a * b;
-    return product % p; 
-    // 取模要多一个sign bit
+    // Integer product = a * b;
+    // return product % p;
+    // emp::Integer keeps multiplication result at the same bit-width.
+    // Widen first to avoid truncation before modulo.
+    const size_t base_len = a.size();
+    const size_t wide_len = std::max(base_len, p.size()) * 2 + 1;
+
+    Integer a_wide = a;
+    Integer b_wide = b;
+    Integer p_wide = p;
+    a_wide.resize(wide_len, false);
+    b_wide.resize(wide_len, false);
+    p_wide.resize(wide_len, false);
+
+    Integer product = a_wide * b_wide;
+    Integer reduced = product % p_wide;
+    reduced.resize(base_len, false);
+    return reduced;
+}
+
+Bit geq_unsigned(const Integer& a, const Integer& b) {
+    const size_t base_len = std::max(a.size(), b.size());
+    const size_t wide_len = base_len + 1;
+    Integer a_wide = a;
+    Integer b_wide = b;
+    a_wide.resize(wide_len, false);
+    b_wide.resize(wide_len, false);
+    return a_wide >= b_wide;
 }
 
 int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
@@ -86,8 +159,12 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         }
         get_config().prg_seed = prg_seed;
     }
+    
     const GlobalConfig& config = get_config();
     int tot_rounds = config.mom_tt * config.mom_kk;
+    std::cerr << "[Server" << party << "] mom_kk=" << config.mom_kk
+              << ", mom_tt=" << config.mom_tt
+              << ", total_rounds=" << tot_rounds << std::endl;
     ASSERT_MSG(tot_rounds <= config.seal_degree, "one batch is not enough for #rounds");
     
     // 阶段1: Server生成seed和密钥
@@ -152,22 +229,20 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
             iosend(party, server_io, secret_key);
             server_io->flush();
         }
-
     }
     
+    size_t relin_key_1_send_bytes = 0;
+    size_t encrypted_seed_1_total_send_bytes = 0;
     if(party == 1) {
-        iosend(party, server_io, relin_key_1);
-        std::cerr << "seed size" << config.seed_size << std::endl;
-        std::cerr << "relin_key" << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
-        for(int i = 0; i < config.seed_size; ++i){
-            iosend(party, server_io, encrypted_seed_1[i]);   
+        iosend(party, server_io, relin_key_1, &relin_key_1_send_bytes);
+        for(int i = 0; i < config.seed_size; ++i) {
+            size_t one_seed_send_bytes = 0;
+            iosend(party, server_io, encrypted_seed_1[i], &one_seed_send_bytes);
+            encrypted_seed_1_total_send_bytes += one_seed_send_bytes;
         }
-        std::cerr << "encryptseed" << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
         server_io->flush();
         iorecv(party, server_io, context, relin_key_2);
-        std::cerr << "relin_key" << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
         for(int i = 0; i < config.seed_size; ++i) iorecv(party, server_io, context, encrypted_seed_2[i]);
-        std::cerr << "encryptseed" << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
     } else {
         iorecv(party, server_io, context, relin_key_2);
         for(int i = 0; i < config.seed_size; ++i) iorecv(party, server_io, context, encrypted_seed_2[i]);
@@ -188,7 +263,8 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     // 输出实际通信大小（以server1为准）
     if (party == 1) {
         std::cerr << "Key generation time: " << key_gen_time << "s" << std::endl;
-        std::cerr << "Key generation Communication: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
+        std::cerr << "key_gen_comm_mb: " << (encrypted_seed_1_total_send_bytes / (1024.0 * 1024.0)) << std::endl;
+        std::cerr << "broadcast_comm_mb: " << ((relin_key_1_send_bytes + encrypted_seed_1_total_send_bytes) / (1024.0 * 1024.0)) << std::endl;
     }
 
     if(!get_config().test_mode) {
@@ -206,14 +282,24 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         for(int i = 0; i < config.seed_size; ++i) iosend(party, client_io, encrypted_seed_2[i]);
         client_io->flush();
     }
-    
     std::cerr << "[Server" << party << "] Phase 2: Waiting for client processing" << std::endl;
+
+    // Reset communication size counter for server1
     if (party == 1) total_communication_size = 0;
-    // 接收来自clients的处理结果
+    
+    // 接收来自clients的处理结果（不计入聚合计算时间）
+    std::vector<Ciphertext> client_results;
+    client_results.reserve(client_connections.size());
     std::stack<std::pair<int, Ciphertext>> t_stack;
     for(auto & client_io : client_connections) {
         Ciphertext client_result;
         iorecv(party, client_io, context, client_result);
+        client_results.push_back(std::move(client_result));
+    }
+
+    // 仅统计“收到结果之后，把结果全都加起来”的计算时间（不含网络接收）
+    auto client_aggregate_start = std::chrono::high_resolution_clock::now();
+    for(const auto & client_result : client_results) {
         auto tmp = std::make_pair(1, client_result);
         while(!t_stack.empty()){
             auto top = t_stack.top();
@@ -232,15 +318,21 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         evaluator.add_inplace(combined_result, t_stack.top().second);
         t_stack.pop();
     }
-    std::cerr << "receive from clients: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
+    auto client_aggregate_end = std::chrono::high_resolution_clock::now();
+    auto client_aggregate_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        client_aggregate_end - client_aggregate_start);
+    double client_aggregate_ms = client_aggregate_us.count() / 1000.0;
+    std::cerr << std::fixed << std::setprecision(3)
+              << "[Server" << party << "] Client results aggregation time: "
+              << client_aggregate_ms << "ms (" << client_aggregate_us.count() << "us)"
+              << std::defaultfloat << std::endl;
+    if (party == 1) {
+        std::cerr << "client_server_comm_mb: " << (total_communication_size / (1024.0 * 1024.0)) << std::endl;
+    }
     // 阶段3: Server进行secret sharing和MPC计算
     std::cerr << "[Server" << party << "] Phase 3: Secret sharing and MPC computation" << std::endl;
-    
-    // 开始服务器恢复时间统计
-    auto server_recover_start = std::chrono::high_resolution_clock::now();
-    if (party == 1) total_communication_size = 0;
 
-    // 与其他server进行secret sharing
+    // 与其他server进行secret sharing（会用DD替换估计, 只统计2PC时间）
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
     for(int i = 0; i < tot_rounds; ++i) {
         rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
@@ -268,22 +360,17 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
     batch_encoder.decode(rnd_2_plain, rnd_2);
 
+    // 开始服务器恢复时间统计 （只统计2PC时间）
+    auto server_recover_start = std::chrono::high_resolution_clock::now();
+    if (party == 1) total_communication_size = 0; //this is for communication of iorecv in seal
+
     // // MPC计算
     // if(party == 1) {
     //     iorecv(party, server_io, context, esti_cipher_1);
     //     iorecv(party, server_io, context, esti_cipher_2);
     //     evaluator.add_plain_inplace(esti_cipher_1, rnd_1_plain);
     //     evaluator.add_plain_inplace(esti_cipher_2, rnd_2_plain);
-    //     Decryptor decryptor_noise_budget(context, sk_noise_budget);
-    //     std::cerr << "before mul esti_cipher_1: "
-    //       << decryptor_noise_budget.invariant_noise_budget(esti_cipher_1) << std::endl;
-    //     std::cerr << "before mul esti_cipher_2: "
-    //       << decryptor_noise_budget.invariant_noise_budget(esti_cipher_2) << std::endl;
-
     //     evaluator.multiply_inplace(esti_cipher_1, esti_cipher_2);
-
-    //     std::cerr << "after mul esti_cipher_1: "
-    //       << decryptor_noise_budget.invariant_noise_budget(esti_cipher_1) << std::endl;
     //     for(int i = 0; i < tot_rounds; ++i) {
     //         rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
     //     }
@@ -305,9 +392,10 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     //     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
     //     batch_encoder.decode(rnd_2_plain, rnd_2);
     // }
-
-    
-
+    // size_t io_bytes_before = 0, io_bytes_after = 0;
+    // if (party == 1) {
+    //     io_bytes_before = server_io->counter;
+    // }
     // setup_semi_honest(server_io, party);
     // int mpcbitlen = 32;
     // Integer *esti_1 = new Integer[get_config().mom_tt], *esti_2 = new Integer[get_config().mom_tt], 
@@ -333,104 +421,144 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     // int64_t psi_ca = esti_sum[get_config().mom_tt/2].reveal<int64_t>(PUBLIC);
     // delete[] esti_1, esti_2, esti_sum;
     // finalize_semi_honest();
-    // ==================== direct 2PC multiplication version ====================
-// Assumption from your current protocol:
-//
-// party == 1 (ALICE):
-//   - rnd_1 = Alice local random mask
-//   - rnd_2 = value decrypted from Bob's sent ciphertext
-//   - so rnd_2 + Bob's rnd_1 = Bob's aggregated plaintext
-//
-// party == 2 (BOB):
-//   - rnd_1 = Bob local random mask
-//   - rnd_2 = value decrypted from Alice's sent ciphertext
-//   - so rnd_2 + Alice's rnd_1 = Alice's aggregated plaintext
-//
-// Goal:
-//   X_i = alice_rnd2[i] + bob_rnd1[i]
-//   Y_i = bob_rnd2[i] + alice_rnd1[i]
-//   product_i = X_i * Y_i
-//
-// Under local view:
-//   ALICE knows: alice_rnd1 = rnd_1, alice_rnd2 = rnd_2
-//   BOB   knows: bob_rnd1   = rnd_1, bob_rnd2   = rnd_2
-//
-// So in MPC, for each slot i:
-//   X_i = alice_rnd2[i] + bob_rnd1[i]
-//   Y_i = bob_rnd2[i]   + alice_rnd1[i]
-//
-// Then keep your original "sum kk -> median over tt -> divide by kk" logic.
-// ==========================================================================
 
-    setup_semi_honest(server_io, party);
-
-    // Keep residue handling close to the original code:
-    // 1. reconstruct residues mod p inside MPC
-    // 2. multiply with mod_mul(..., modp)
-    // 3. sum inside each tt-bucket mod p
-    // 4. only after bucket sum, apply the original centered interpretation
-
-    const int mpcbitlen = 64;
-    const uint64_t plain_mod_u64 = parms.plain_modulus().value();
-    const uint64_t mod23_u64 = plain_mod_u64 * 2 / 3;
-
-    Integer modp(mpcbitlen, plain_mod_u64, PUBLIC);
-    Integer mod23p(mpcbitlen, mod23_u64, PUBLIC);
-
-    Integer *esti_sum = new Integer[get_config().mom_tt];
-
-    for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-        Integer bucket_sum(mpcbitlen, 0, PUBLIC);
-
-        for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-            // On ALICE:
-            //   rnd_1 = alice local mask
-            //   rnd_2 = value decrypted from Bob's sent ciphertext
-            //
-            // On BOB:
-            //   rnd_1 = bob local mask
-            //   rnd_2 = value decrypted from Alice's sent ciphertext
-            //
-            // Target:
-            //   X = alice_rnd2 + bob_rnd1
-            //   Y = bob_rnd2   + alice_rnd1
-
-            Integer alice_rnd1(mpcbitlen, party == ALICE ? rnd_1[i] : 0, ALICE);
-            Integer alice_rnd2(mpcbitlen, party == ALICE ? rnd_2[i] : 0, ALICE);
-            Integer bob_rnd1  (mpcbitlen, party == BOB   ? rnd_1[i] : 0, BOB);
-            Integer bob_rnd2  (mpcbitlen, party == BOB   ? rnd_2[i] : 0, BOB);
-
-            // Reconstruct the two residues mod p
-            Integer x_mod = mod_add(alice_rnd2, bob_rnd1, modp);
-            Integer y_mod = mod_add(bob_rnd2, alice_rnd1, modp);
-
-            // Multiply mod p directly in MPC
-            Integer prod_mod = mod_mul(x_mod, y_mod, modp);
-
-            // Bucket sum in Z_p
-            bucket_sum = mod_add(bucket_sum, prod_mod, modp);
-        }
-
-        // Preserve original residue handling style:
-        // only interpret the final tt-bucket residue as signed-ish value
-        Bit over = bucket_sum >= mod23p;
-        esti_sum[tt] = If(over, bucket_sum - modp, bucket_sum);
+    // Before setup_semi_honest: record NetIO counters
+    size_t io_bytes_before = 0, io_bytes_after = 0;
+    if (party == 1) {
+        io_bytes_before = server_io->counter;
     }
 
-    sort(esti_sum, get_config().mom_tt);
-    int64_t psi_ca = esti_sum[get_config().mom_tt / 2].reveal<int64_t>(PUBLIC);
+    IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+    const bool ole_sender_role = (party == BOB);
+    if (party == BOB) {
+        cot->setup_send();
+    } else {
+        cot->setup_recv();
+    }
+
+    // const int mpcbitlen = 24;
+    // const uint64_t plain_mod_u64 = parms.plain_modulus().value();
+    // const uint64_t mod23_u64 = plain_mod_u64 * 2 / 3;
+
+    // Integer modp(mpcbitlen, plain_mod_u64, PUBLIC);
+    // Integer mod23p(mpcbitlen, mod23_u64, PUBLIC);
+
+    // Integer *esti_sum = new Integer[get_config().mom_tt];
+
+    // for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+    //     Integer bucket_sum(mpcbitlen, 0, PUBLIC);
+
+    //     for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+    //         //   rnd_1 = alice local mask
+    //         //   rnd_2 = value decrypted from Bob's sent ciphertext
+    //         //
+    //         // On BOB:
+    //         //   rnd_1 = bob local mask
+    //         //   rnd_2 = value decrypted from Alice's sent ciphertext
+    //         //
+    //         // Target:
+    //         //   X = alice_rnd2 + bob_rnd1
+    //         //   Y = bob_rnd2   + alice_rnd1
+
+    //         Integer alice_rnd1(mpcbitlen, party == ALICE ? rnd_1[i] : 0, ALICE);
+    //         Integer alice_rnd2(mpcbitlen, party == ALICE ? rnd_2[i] : 0, ALICE);
+    //         Integer bob_rnd1  (mpcbitlen, party == BOB   ? rnd_1[i] : 0, BOB);
+    //         Integer bob_rnd2  (mpcbitlen, party == BOB   ? rnd_2[i] : 0, BOB);
+
+    //         // Reconstruct the two residues mod p
+    //         Integer x_mod = mod_add(alice_rnd2, bob_rnd1, modp);
+    //         Integer y_mod = mod_add(bob_rnd2, alice_rnd1, modp);
+
+    //         // Multiply mod p directly in MPC
+    //         Integer prod_mod = mod_mul(x_mod, y_mod, modp);
+
+    //         // Bucket sum in Z_p
+    //         bucket_sum = mod_add(bucket_sum, prod_mod, modp);
+    //     }
+
+    //     // Preserve original residue handling style:
+    //     // only interpret the final tt-bucket residue as signed-ish value
+    //     Bit over = geq_unsigned(bucket_sum, mod23p);
+    //     esti_sum[tt] = If(over, bucket_sum - modp, bucket_sum);
+    // }
+
+    // sort(esti_sum, get_config().mom_tt);
+    // int64_t psi_ca = esti_sum[get_config().mom_tt / 2].reveal<int64_t>(PUBLIC);
+
+    // delete[] esti_sum;
+    // finalize_semi_honest();
+
+    const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
+    const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
+
+    OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
+
+    const size_t rounds = static_cast<size_t>(tot_rounds);
+    std::vector<uint32_t> local_terms(rounds, 0u);
+    std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
+    std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
+
+    // Batch OLE across all rounds to reduce per-call protocol overhead.
+    for (size_t i = 0; i < rounds; ++i) {
+        const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+        const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+        const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+        const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+        local_terms[i] = (party == ALICE)
+            ? mul_mod_u32(xA, yA, plain_mod_u32)
+            : mul_mod_u32(xB, yB, plain_mod_u32);
+
+        cross1_in[i] = (party == ALICE) ? xA : yB;
+        cross2_in[i] = (party == ALICE) ? yA : xB;
+    }
+    ole.compute(cross1_out, cross1_in);
+    ole.compute(cross2_out, cross2_in);
+
+    int64_t *esti_sum = new int64_t[get_config().mom_tt];
+
+    for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+        uint32_t bucket_share = 0;
+
+        for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+            uint32_t prod_share = local_terms[i];
+            prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+            prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+
+            bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+        }
+
+        uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+
+        esti_sum[tt] = (bucket_sum >= mod23_u32)
+            ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
+            : (int64_t)bucket_sum;
+    }
+
+    std::sort(esti_sum, esti_sum + get_config().mom_tt);
+    int64_t psi_ca = esti_sum[get_config().mom_tt / 2];
 
     delete[] esti_sum;
-    finalize_semi_honest();
+    delete cot;
+
+    size_t mpc_comm = 0;
+    if (party == 1) {
+        io_bytes_after = server_io->counter;
+        mpc_comm = io_bytes_after - io_bytes_before;
+        std::cerr << "2PC communication: " << mpc_comm << " bytes ("
+                << (mpc_comm / (1024.0 * 1024.0)) << " MB)" << std::endl;
+    }
     
-    // 计算服务器恢复时间
+    // 计算服务器恢复时间 = 客户端结果聚合 + 2PC
     auto server_recover_end = std::chrono::high_resolution_clock::now();
     auto server_recover_duration = std::chrono::duration_cast<std::chrono::milliseconds>(server_recover_end - server_recover_start);
-    double server_recover_time = server_recover_duration.count() / 1000.0;
-    
+    double server_2pc_time = server_recover_duration.count() / 1000.0;
+    double server_recover_time = server_2pc_time + client_aggregate_us.count() / 1000000.0;
+
     if(party == 1) {
+        std::cerr << "server_2pc_time: " << server_2pc_time << "s" << std::endl;
         std::cerr << "Server recovery time: " << server_recover_time << "s" << std::endl;
-        std::cerr << "Server recovery Communication: " << (total_communication_size / (1024.0 * 1024.0)) << " MB" << std::endl;
+        std::cerr << "Server recovery Communication: " << ((total_communication_size + mpc_comm)/ (1024.0 * 1024.0) ) << " MB" << std::endl;
     }
     
     // 计算总时间
@@ -445,7 +573,12 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     return psi_ca / get_config().mom_kk;
 }
 
-int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& weighted_input, emp::NetIO* io) {
+    // FHE Phase 1: weight not yet supported by FHE protocol — extract values, drop weight.
+    std::vector<int> input_set;
+    input_set.reserve(weighted_input.size());
+    for (const auto& wi : weighted_input) input_set.push_back(wi.value);
+
     if(get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -483,100 +616,85 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput
         iorecv(party, io, context, encrypted_seed[i]);
     }
     
-    // 处理输入集合
+    // 处理输入集合 - 单线程版本
     // 开始客户端计算时间统计
     auto client_compute_start = std::chrono::high_resolution_clock::now();
 
-    AESGen aes_gen(0);
+    std::cerr << "[Client" << config.party << "] Using 1 thread for " 
+              << input_set.size() << " items" << std::endl;
+
     std::unordered_map<uint64_t, Ciphertext> t_map;
-    std::stack<std::pair<int, Ciphertext>> t_stack_in;
+    std::stack<std::pair<int, Ciphertext>> t_stack;
+    AESGen aes_gen(0);
     std::vector<Ciphertext> calc_prg(config.prg_dd);
-    
-    auto t_start_loop = std::chrono::high_resolution_clock::now();
-    std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
-    Plaintext weight_plain;
-    for(const auto& item : input_set) {
-        std::vector<int> ids = aes_gen.get_id_group(0, item.value);
+
+    for(size_t idx = 0; idx < input_set.size(); ++idx) {
+        auto item = input_set[idx];
+        std::vector<int> ids = aes_gen.get_id_group(0, item);
         sort(ids.begin(), ids.end());
-        for(int i = 0; i < config.prg_dd; i+=2) {
+
+        // 处理PRG计算
+        for(int i = 0; i < config.prg_dd; i += 2) {
             if(i + 1 == config.prg_dd) {
                 calc_prg[i] = encrypted_seed[ids[i]];
                 evaluator.mod_switch_to_next_inplace(calc_prg[i]);
             } else {
-                uint64_t key = ((uint64_t)ids[i]<<32) | ids[i+1];
-                if(!t_map.count(key)) {
-                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i+1]], calc_prg[i]);
+                uint64_t key = ((uint64_t)ids[i] << 32) | ids[i + 1];
+                if(t_map.count(key)) {
+                    calc_prg[i] = t_map[key];
+                } else {
+                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i + 1]], calc_prg[i]);
                     evaluator.relinearize_inplace(calc_prg[i], relin_key);
                     evaluator.mod_switch_to_next_inplace(calc_prg[i]);
                     t_map[key] = calc_prg[i];
-                } else {
-                    calc_prg[i] = t_map[key];
                 }
             }
         }
-        if (item.weight != 1) {
-            std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
-            ASSERT_MSG(item.weight > 0, "weight must be a positive integer");
-            uint64_t encoded_weight = static_cast<uint64_t>(item.weight);
-            for (int round = 0; round < tot_rounds; ++round) {
-                weight_slots[round] = encoded_weight;
-            }
-            batch_encoder.encode(weight_slots, weight_plain);
-            evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
-        }
-        if(!get_config().test_mode) {
-            Decryptor decryptor_noise_budget(context, sk_noise_budget);
-            std::cerr << "noise budget - multiply 1: " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
-        }
+
+        // 多层乘法计算
         for(int w = 2; w < config.prg_dd; w <<= 1) {
-            for(int i = 0; i < config.prg_dd; i += (w<<1)) {
+            for(int i = 0; i < config.prg_dd; i += (w << 1)) {
                 if(i + w < config.prg_dd) {
                     evaluator.multiply_inplace(calc_prg[i], calc_prg[i + w]);
                     evaluator.relinearize_inplace(calc_prg[i], relin_key);
                 }
             }
-            // if(!get_config().test_mode) {
-            //     Decryptor decryptor_noise_budget(context, sk_noise_budget);
-            //     std::cerr << "noise budget - multiply " << w << ": " << decryptor_noise_budget.invariant_noise_budget(calc_prg[0]) << std::endl;
-            // }
         }
+
+        // 累加到stack
         auto sum_prg = std::make_pair(1, calc_prg[0]);
-        while(!t_stack_in.empty()){
-            auto top = t_stack_in.top();
+        while(!t_stack.empty()) {
+            auto top = t_stack.top();
             ASSERT_MSG(abs(top.first) >= abs(sum_prg.first), "stack top should be larger than current");
             if(top.first == sum_prg.first) {
                 evaluator.add_inplace(sum_prg.second, top.second);
                 sum_prg.first <<= 1;
-                t_stack_in.pop();
+                t_stack.pop();
             } else break;
         }
-        t_stack_in.push(sum_prg);
+        t_stack.push(sum_prg);
     }
-    auto t_end_loop = std::chrono::high_resolution_clock::now();
 
-    Ciphertext esti_cipher = t_stack_in.top().second;
-    t_stack_in.pop();
-    while(!t_stack_in.empty()) {
-        evaluator.add_inplace(esti_cipher, t_stack_in.top().second);
-        t_stack_in.pop();
+    // 最终合并
+    Ciphertext esti_cipher = t_stack.top().second;
+    t_stack.pop();
+    while(!t_stack.empty()) {
+        evaluator.add_inplace(esti_cipher, t_stack.top().second);
+        t_stack.pop();
     }
-    
+
     // 计算客户端计算时间
-
     auto client_compute_end = std::chrono::high_resolution_clock::now();
     auto client_compute_duration = std::chrono::duration_cast<std::chrono::milliseconds>(client_compute_end - client_compute_start);
     double client_compute_time = client_compute_duration.count() / 1000.0;
-    double loop_time  = std::chrono::duration<double>(t_end_loop - t_start_loop).count();
-    double per_element = loop_time / input_set.size();
     
     std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
-    std::cerr << "Loop time: " << loop_time << " s" << std::endl;
-    std::cerr << "Per element: " << per_element * 1000 << " ms" << std::endl;
     std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
 
     // 发送结果给对应的server
     iosend(party, io, esti_cipher);
     io->flush();
+
     return -1; // Client不返回PSI大小
 }
 

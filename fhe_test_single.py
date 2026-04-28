@@ -11,27 +11,41 @@ import time
 import signal
 import shutil
 import re
+import argparse
+import threading
+from datetime import datetime
 
 # ==================== CONFIGURABLE PARAMETERS ====================
 # Test parameters - Small for quick testing
 UNIVERSAL_SIZE_BIT = 24  # Small for quick testing
-SET_SIZE = 2**7  # Small for quick testing
-INTERSECTION_SIZE = SET_SIZE // 2
+SET_SIZE = None  # Will be set by command-line argument or default
+LOG_FILE = None  # Will be set based on set size
+INTERSECTION_SIZE = None  # Will be set by command-line argument or default
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
 
 # Test parameters
-VERBOSE = True
+VERBOSE = False  # Set True via --verbose to also stream INFO logs to the terminal
 CLEANUP_AFTER_TEST = True
-TIMEOUT_SECONDS = 7200  # 5 minutes timeout for FHE
+TIMEOUT_SECONDS = 7200  # 120 minutes timeout for larger FHE tests
+PRG_DD = 6  # Default value, will be overridden by command-line argument
+
+# Levels that always reach the terminal regardless of VERBOSE.
+ALWAYS_PRINT_LEVELS = {"ERROR", "WARNING", "RESULT"}
 
 # ==================== HELPER FUNCTIONS ====================
 
 def log(message, level="INFO"):
-    """Print log message"""
-    if VERBOSE:
-        print(f"[{level}] {message}")
+    """Always write to LOG_FILE; terminal prints depend on VERBOSE / level."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_msg = f"[{timestamp}] [{level}] {message}"
+    if VERBOSE or level in ALWAYS_PRINT_LEVELS:
+        print(log_msg, flush=True)
+    if LOG_FILE:
+        with open(LOG_FILE, 'a') as f:
+            f.write(log_msg + '\n')
+            f.flush()
 
 def kill_existing_processes():
     """Kill any existing PSI processes"""
@@ -66,14 +80,30 @@ def start_process(cmd, description):
     process = subprocess.Popen(
         cmd, 
         shell=True, 
-        stdout=subprocess.PIPE, 
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
         preexec_fn=os.setsid
     )
+    process._captured_output = []
+
+    def _stream_output():
+        if process.stdout is None:
+            return
+        for line in iter(process.stdout.readline, ""):
+            process._captured_output.append(line)
+            line = line.rstrip()
+            if line:
+                log(f"[{description}] {line}")
+        process.stdout.close()
+
+    process._output_thread = threading.Thread(target=_stream_output, daemon=True)
+    process._output_thread.start()
     time.sleep(0.3)  # Wait for process to start
     return process
 
-def wait_for_processes(processes, timeout=TIMEOUT_SECONDS):
+def wait_for_processes(processes, timeout=120):
     """Wait for multiple processes to complete"""
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -90,36 +120,13 @@ def wait_for_processes(processes, timeout=TIMEOUT_SECONDS):
 def extract_timing_from_output(processes):
     """Extract timing information from process output"""
     timing_data = {}
-    all_process_logs = []
-
-    def _to_metric_key(prefix):
-        """Convert log label to stable snake_case metric key."""
-        key = prefix.strip().lower()
-        key = re.sub(r'[^a-z0-9]+', '_', key).strip('_')
-        return f"{key}_communication_mb"
-
-    def _store_communication_metric(metric_key, value):
-        """Store communication metric without overwriting duplicates."""
-        if metric_key not in timing_data:
-            timing_data[metric_key] = value
-            return
-        idx = 2
-        while f"{metric_key}_{idx}" in timing_data:
-            idx += 1
-        timing_data[f"{metric_key}_{idx}"] = value
     
     for i, process in enumerate(processes):
         if process.poll() is not None:
-            stdout = process.stdout.read().decode() if process.stdout else ""
-            stderr = process.stderr.read().decode() if process.stderr else ""
-            output = stdout + stderr
-
-            # Keep full process logs so newly added psi.cpp debug outputs are shown automatically.
-            all_process_logs.append({
-                "process": i + 1,
-                "stdout": stdout,
-                "stderr": stderr,
-            })
+            output = "".join(getattr(process, "_captured_output", []))
+            
+            if i < 3: # Servers
+                log(f"Process {i+1} output captured ({len(output)} chars)")
             
             # Extract timing information
             key_gen_match = re.search(r'Key generation time: ([\d.]+)s', output)
@@ -133,25 +140,35 @@ def extract_timing_from_output(processes):
             server_recover_match = re.search(r'Server recovery time: ([\d.]+)s', output)
             if server_recover_match:
                 timing_data[f"server_recover_time_{i+1}"] = float(server_recover_match.group(1))
-            
-            # Extract all communication sizes with "... Communication: X MB"
-            comm_matches = re.findall(
-                r'([A-Za-z][A-Za-z0-9 _-]*?)\s+Communication:\s*([\d.]+)\s*MB',
-                output
-            )
-            for label, value in comm_matches:
-                value = float(value)
-                metric_key = _to_metric_key(label)
-                _store_communication_metric(metric_key, value)
 
-            # Extract special communication logs without "Communication:"
-            special_comm_patterns = [
-                (r'(testmode-prgsetup)\s*([\d.]+)\s*MB', "testmode_prgsetup_communication_mb"),
-                (r'(noise budget and secret key)\s*([\d.]+)\s*MB', "noise_budget_and_secret_key_communication_mb"),
-            ]
-            for pattern, metric_key in special_comm_patterns:
-                for _, value in re.findall(pattern, output):
-                    _store_communication_metric(metric_key, float(value))
+            # server_recover_time = aggregation + 2PC; pure 2PC is also emitted separately
+            server_2pc_match = re.search(r'server_2pc_time: ([\d.]+)s', output)
+            if server_2pc_match:
+                timing_data[f"server_2pc_time_{i+1}"] = float(server_2pc_match.group(1))
+
+            # Extract per-server client-results aggregation time (printed in ms by psi.cpp)
+            aggregation_match = re.search(r'Client results aggregation time:\s*([\d.]+)\s*ms', output)
+            if aggregation_match:
+                timing_data[f"aggregation_time_ms_{i+1}"] = float(aggregation_match.group(1))
+
+            # Extract key generation communication breakdown
+            key_gen_comm_match = re.search(r'key_gen_comm_mb: ([\d.]+)', output)
+            if key_gen_comm_match:
+                timing_data["key_gen_comm_mb"] = float(key_gen_comm_match.group(1))
+
+            broadcast_comm_match = re.search(r'broadcast_comm_mb: ([\d.]+)', output)
+            if broadcast_comm_match:
+                timing_data["broadcast_comm_mb"] = float(broadcast_comm_match.group(1))
+
+            # Extract client-to-server result communication size
+            client_server_comm_match = re.search(r'client_server_comm_mb: ([\d.]+)', output)
+            if client_server_comm_match:
+                timing_data["client_server_comm_mb"] = float(client_server_comm_match.group(1))
+
+            # Extract server recovery communication size
+            comm_match = re.search(r'Server recovery Communication: ([\d.]+) MB', output)
+            if comm_match:
+                timing_data["server_recover_communication_mb"] = float(comm_match.group(1))
             
             # Extract PSI size
             psi_match = re.search(r'Final PSI size: (\d+)', output)
@@ -163,17 +180,6 @@ def extract_timing_from_output(processes):
             if total_match:
                 timing_data[f"total_server_{i+1}"] = float(total_match.group(1))
     
-    # Add a convenient aggregate over all extracted communication metrics
-    total_communication_mb = sum(
-        value for key, value in timing_data.items()
-        if "communication" in key and isinstance(value, (int, float))
-    )
-    if total_communication_mb > 0:
-        timing_data["total_communication_mb"] = total_communication_mb
-
-    if all_process_logs:
-        timing_data["all_process_logs"] = all_process_logs
-
     return timing_data
 
 # ==================== TEST FUNCTIONS ====================
@@ -218,25 +224,24 @@ def generate_test_data():
     
     return True, server1_files, server2_files, expected_intersection_size
 
-def run_fhe_test(server1_files, server2_files):
+def run_fhe_test(server1_files, server2_files, seed_size_bit):
     """Run FHE PSI test"""
     log("=" * 50)
     log("RUNNING FHE PSI TEST")
     log("=" * 50)
     
     # FHE parameters
-    seed_size = 64
-    prg_dd = 6
+    prg_dd = PRG_DD
     network_mode = "lan"
     
     # Start servers with FHE mode
-    server1_cmd = f"stdbuf -oL -eL ./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
+    server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode}"
-    server2_cmd = f"stdbuf -oL -eL ./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
+    server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                  f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                  f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                   f"--network_mode={network_mode}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
@@ -248,10 +253,10 @@ def run_fhe_test(server1_files, server2_files):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server1_files[i]
-        client_cmd = f"stdbuf -oL -eL ./bin/psi_client -p {client_id} --port={PORT} " \
+        client_cmd = f"./bin/psi_client -p {client_id} --port={PORT} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                      f"--network_mode={network_mode}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
@@ -260,10 +265,10 @@ def run_fhe_test(server1_files, server2_files):
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
-        client_cmd = f"stdbuf -oL -eL ./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} " \
+        client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={PORT} " \
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-                     f"--seed_size={seed_size} --prg_dd={prg_dd} " \
+                     f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                      f"--network_mode={network_mode}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
@@ -271,18 +276,22 @@ def run_fhe_test(server1_files, server2_files):
     # Wait for all processes to complete
     all_processes = [server1_process, server2_process] + client_processes
     success = wait_for_processes(all_processes, TIMEOUT_SECONDS)
+
+    # Ensure output reader threads have drained process output
+    for process in all_processes:
+        output_thread = getattr(process, "_output_thread", None)
+        if output_thread is not None:
+            output_thread.join(timeout=1.0)
     
     if not success:
         log("Some processes did not complete within timeout", "ERROR")
-        timing_data = extract_timing_from_output(all_processes)
-        return False, timing_data
+        return False, None
     
     # Check if all processes completed successfully
     for i, process in enumerate(all_processes):
         if process.returncode != 0:
             log(f"Process {i+1} failed with return code {process.returncode}", "ERROR")
-            timing_data = extract_timing_from_output(all_processes)
-            return False, timing_data
+            return False, None
     
     # Extract timing information
     timing_data = extract_timing_from_output(all_processes)
@@ -299,32 +308,59 @@ def validate_results(expected_size, timing_data):
         log("No timing data extracted", "ERROR")
         return False
     
-    # Print timing information
-    log("Timing Results:")
-    for key, value in timing_data.items():
-        if "time" in key or "size" in key or "communication" in key:
-            log(f"  {key}: {value}")
+    # Print timing information grouped by protocol phase, in protocol order.
+    # Each entry: (key_or_prefix, "exact" | "prefix")
+    timing_groups = [
+        ("Key generation", [
+            ("key_gen_server_time_", "prefix"),
+            ("key_gen_comm_mb", "exact"),
+            ("broadcast_comm_mb", "exact"),
+        ]),
+        ("Client compute", [
+            ("client_compute_time_", "prefix"),
+        ]),
+        ("Client -> Server comm", [
+            ("client_server_comm_mb", "exact"),
+        ]),
+        ("Aggregation", [
+            ("aggregation_time_ms_", "prefix"),
+        ]),
+        ("2PC", [
+            ("server_2pc_time_", "prefix"),
+            ("server_recover_communication_mb", "exact"),
+        ]),
+    ]
 
-    # Print complete PSI process logs (no keyword filter).
-    all_process_logs = timing_data.get("all_process_logs", [])
-    if all_process_logs:
-        log("Full PSI Process Logs:")
-        for proc in all_process_logs:
-            proc_id = proc["process"]
-            stdout = proc["stdout"].strip()
-            stderr = proc["stderr"].strip()
-            log(f"Process {proc_id} stdout:")
-            if stdout:
-                for line in stdout.splitlines():
-                    log(f"  {line}")
-            else:
-                log("  <empty>")
-            log(f"Process {proc_id} stderr:")
-            if stderr:
-                for line in stderr.splitlines():
-                    log(f"  {line}")
-            else:
-                log("  <empty>")
+    display_names = {
+        "server_recover_communication_mb": "2PC_mb",
+    }
+
+    def _unit_for(key):
+        if key.endswith("_mb"):
+            return "MB"
+        if "_ms_" in key or key.endswith("_ms"):
+            return "ms"
+        if "_time_" in key or key.endswith("_time"):
+            return "s"
+        return ""
+
+    log("Timing Results:", "RESULT")
+    printed = set()
+    for group_name, patterns in timing_groups:
+        keys_in_group = []
+        for pattern, mode in patterns:
+            for key in sorted(timing_data.keys()):
+                hit = key == pattern if mode == "exact" else key.startswith(pattern)
+                if hit and key not in printed:
+                    keys_in_group.append(key)
+                    printed.add(key)
+        if keys_in_group:
+            log(f"  [{group_name}]", "RESULT")
+            for key in keys_in_group:
+                display_key = display_names.get(key, key)
+                unit = _unit_for(display_key)
+                suffix = f" {unit}" if unit else ""
+                log(f"    {display_key}: {timing_data[key]}{suffix}", "RESULT")
     
     # Check PSI size if available
     if "psi_size" in timing_data:
@@ -339,27 +375,6 @@ def validate_results(expected_size, timing_data):
             log(f"  Expected: {expected_size}, Actual: {actual_size}")
     else:
         log("Warning: Could not extract PSI size from output", "WARNING")
-
-        # ==================== NEW: CLIENT AVERAGE TIME ====================
-    client_times = [
-        value for key, value in timing_data.items()
-        if key.startswith("client_compute_time")
-    ]
-    
-    if client_times:
-        avg_client_time = sum(client_times) / len(client_times)
-        log(f"\nAverage client computation time: {avg_client_time:.6f} s")
-
-        # ==================== PER ELEMENT TIME ====================
-        # 每个 client 处理 SET_SIZE 个元素
-        avg_time_per_element = avg_client_time / SET_SIZE
-        
-        log(f"Average time per element: {avg_time_per_element:.9f} s")
-        
-        # 可选：更直观（微秒）
-        log(f"Average time per element: {avg_time_per_element * 1e3:.3f} ms")
-    else:
-        log("Warning: No client computation time found", "WARNING")
     
     return True
 
@@ -369,7 +384,7 @@ def cleanup():
         shutil.rmtree(OUTPUT_DIR)
         log("Cleaned up test data directory")
 
-def test_fhe_psi():
+def test_fhe_psi(seed_size_bit):
     """Main test function for FHE PSI"""
     log("Starting FHE PSI test...")
     
@@ -390,11 +405,8 @@ def test_fhe_psi():
             return False
         
         # Run FHE test
-        success, timing_data = run_fhe_test(server1_files, server2_files)
+        success, timing_data = run_fhe_test(server1_files, server2_files, seed_size_bit)
         if not success:
-            # Print whatever logs/metrics we collected to aid debugging.
-            if timing_data:
-                validate_results(expected_size, timing_data)
             return False
         
         # Validate results
@@ -409,20 +421,61 @@ def test_fhe_psi():
 
 def main():
     """Main function"""
-    log("Starting FHE PSI test...")
+    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE
+
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='FHE PSI Single Test')
+    parser.add_argument('--set_size_bit', type=int, default=5,
+                       help='Set size as power of 2 (e.g., 17 for 2^17 = 131072)')
+    parser.add_argument('--prg_dd', type=int, default=6,
+                       help='PRG degree parameter (default: 6)')
+    parser.add_argument('--seed_size_bit', type=int, default=6,
+                       help='Seed size as power of 2 (e.g., 6 for 2^6 = 64 bits)')
+    parser.add_argument('--num_clients_per_server', type=int, default=1,
+                       help='Number of clients connected to each server (default: 1)')
+    parser.add_argument('--output_log', type=str, default=None,
+                       help='Output log file (default: fhe_test_<set_size_bit>.log)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                       help='Stream all logs to the terminal (default: only timing results and errors).')
+
+    args = parser.parse_args()
+
+    # Set global variables based on arguments
+    SET_SIZE = 2 ** args.set_size_bit
+    INTERSECTION_SIZE = SET_SIZE // 2
+    PRG_DD = args.prg_dd
+    NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
+    VERBOSE = args.verbose
+    
+    if args.output_log:
+        LOG_FILE = args.output_log
+    else:
+        LOG_FILE = f"fhe_test_{args.set_size_bit}.log"
+    
+    # Clear previous log file
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
+    
+    log(f"Starting FHE PSI test with set_size=2^{args.set_size_bit}={SET_SIZE}")
+    log(f"Seed size: 2^{args.seed_size_bit}={2 ** args.seed_size_bit} bits")
+    log(f"PRG DD: {PRG_DD}")
+    log(f"Clients per server: {NUM_CLIENTS_PER_SERVER}")
+    log(f"Total clients: {2 * NUM_CLIENTS_PER_SERVER}")
+    log(f"Logging to: {LOG_FILE}")
     
     # Run single correctness test
-    success = test_fhe_psi()
+    success = test_fhe_psi(args.seed_size_bit)
     
     if success:
-        log("=" * 50)
-        log("✓ FHE PSI TEST PASSED")
-        log("=" * 50)
+        log("=" * 50, "RESULT")
+        log("✓ FHE PSI TEST PASSED", "RESULT")
+        log("=" * 50, "RESULT")
     else:
-        log("=" * 50)
-        log("✗ FHE PSI TEST FAILED")
-        log("=" * 50)
-    
+        log("=" * 50, "RESULT")
+        log("✗ FHE PSI TEST FAILED", "RESULT")
+        log("=" * 50, "RESULT")
+
+    log(f"Log file saved to: {LOG_FILE}", "RESULT")
     return success
 
 if __name__ == "__main__":

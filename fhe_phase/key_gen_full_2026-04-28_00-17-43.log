@@ -1,0 +1,37 @@
+[2026-04-28 00:17:43] ==========================================================
+[2026-04-28 00:17:43] FHE Seed Bits Test (Local Mode)
+[2026-04-28 00:17:43] ==========================================================
+[2026-04-28 00:17:43] Seed sizes: 6
+[2026-04-28 00:17:43] Set size: 2^5 = 32
+[2026-04-28 00:17:43] PRG DD: 6
+[2026-04-28 00:17:43] Logs:
+[2026-04-28 00:17:43]   - Full log: /home/ysk3460/psi-code/fhe_phase/key_gen_full_2026-04-28_00-17-43.log
+[2026-04-28 00:17:43]   - Analysis log: /home/ysk3460/psi-code/fhe_phase/key_gen_analysis_2026-04-28_00-17-43.log
+[2026-04-28 00:17:43] ==========================================================
+[2026-04-28 00:17:43] 
+[2026-04-28 00:17:43] --- [LOCAL] Testing with Seed Size=2^6 = 64 bits ---
+[2026-04-28 00:17:46] [RESULT] Timing Results:
+[2026-04-28 00:17:46] [RESULT]   [Key generation]
+[2026-04-28 00:17:46] [RESULT]     key_gen_server_time_1: 0.719 s
+[2026-04-28 00:17:46] [RESULT]     key_gen_comm_mb: 26.1907 MB
+[2026-04-28 00:17:46] [RESULT]     broadcast_comm_mb: 28.0895 MB
+[2026-04-28 00:17:46] [RESULT]   [Client compute]
+[2026-04-28 00:17:46] [RESULT]     client_compute_time_3: 0.831 s
+[2026-04-28 00:17:46] [RESULT]     client_compute_time_4: 0.821 s
+[2026-04-28 00:17:46] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:17:46] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:17:46] [RESULT]   [Aggregation]
+[2026-04-28 00:17:46] [RESULT]     aggregation_time_ms_1: 0.036 ms
+[2026-04-28 00:17:46] [RESULT]     aggregation_time_ms_2: 0.04 ms
+[2026-04-28 00:17:46] [RESULT]   [2PC]
+[2026-04-28 00:17:46] [RESULT]     server_2pc_time_1: 0.025 s
+[2026-04-28 00:17:46] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:17:46] [RESULT] ==================================================
+[2026-04-28 00:17:46] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:17:46] [RESULT] ==================================================
+[2026-04-28 00:17:46] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_seed_test_local_6.log
+[2026-04-28 00:17:46] ✓ [LOCAL] Seed 2^6 (64 bits): Key Gen Server 0.719s, key_gen_comm 26.1907 MB, broadcast_comm 28.0895 MB
+[2026-04-28 00:17:46] 
+[2026-04-28 00:17:46] ==========================================================
+[2026-04-28 00:17:46] Test suite completed
+[2026-04-28 00:17:46] ==========================================================

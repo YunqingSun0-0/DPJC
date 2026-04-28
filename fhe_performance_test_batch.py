@@ -149,10 +149,14 @@ def extract_timing_from_output(processes, timing_type):
                 if match:
                     timing_data[f"server_{i+1}"] = float(match.group(1))
                 
-                # Extract key generation communication size
-                comm_match = re.search(r'Key generation Communication: ([\d.]+) MB', output)
-                if comm_match:
-                    timing_data["key_gen_communication_mb"] = float(comm_match.group(1))
+                # Extract key generation communication breakdown
+                key_gen_comm_match = re.search(r'key_gen_comm_mb: ([\d.]+)', output)
+                if key_gen_comm_match:
+                    timing_data["key_gen_comm_mb"] = float(key_gen_comm_match.group(1))
+
+                broadcast_comm_match = re.search(r'broadcast_comm_mb: ([\d.]+)', output)
+                if broadcast_comm_match:
+                    timing_data["broadcast_comm_mb"] = float(broadcast_comm_match.group(1))
             
             elif timing_type == "client_compute":
                 # Look for client computation timing
@@ -161,15 +165,30 @@ def extract_timing_from_output(processes, timing_type):
                     timing_data["client"] = float(match.group(1))
             
             elif timing_type == "server_recover":
-                # Look for server recovery timing
+                # Look for server recovery timing (= aggregation + 2PC)
                 match = re.search(r'Server recovery time: ([\d.]+)s', output)
                 if match:
                     timing_data[f"server_{i+1}"] = float(match.group(1))
-                
+
+                # Pure 2PC time (subset of recovery time)
+                server_2pc_match = re.search(r'server_2pc_time: ([\d.]+)s', output)
+                if server_2pc_match:
+                    timing_data[f"server_2pc_time_{i+1}"] = float(server_2pc_match.group(1))
+
+                # Per-server client-results aggregation time (printed in ms)
+                aggregation_match = re.search(r'Client results aggregation time:\s*([\d.]+)\s*ms', output)
+                if aggregation_match:
+                    timing_data[f"aggregation_time_ms_{i+1}"] = float(aggregation_match.group(1))
+
                 # Extract server recovery communication size
                 comm_match = re.search(r'Server recovery Communication: ([\d.]+) MB', output)
                 if comm_match:
                     timing_data["server_recover_communication_mb"] = float(comm_match.group(1))
+
+                # Extract client-to-server result communication size
+                client_server_comm_match = re.search(r'client_server_comm_mb: ([\d.]+)', output)
+                if client_server_comm_match:
+                    timing_data["client_server_comm_mb"] = float(client_server_comm_match.group(1))
             
             # Extract PSI size if available (but don't add it to timing_data)
             if psi_size is None:
@@ -356,8 +375,8 @@ def run_single_test_point(seed_size, set_size, prg_dd, network_mode, test_id, te
                 server_recover_times.append(server_recover_timing)
             
             # Collect communication sizes based on test type
-            if test_type == "key_gen" and key_gen_timing and "key_gen_communication_mb" in key_gen_timing:
-                communication_sizes.append(key_gen_timing["key_gen_communication_mb"])
+            if test_type == "key_gen" and key_gen_timing and "key_gen_comm_mb" in key_gen_timing and "broadcast_comm_mb" in key_gen_timing:
+                communication_sizes.append(key_gen_timing["key_gen_comm_mb"] + key_gen_timing["broadcast_comm_mb"])
             elif test_type == "server_recover" and server_recover_timing and "server_recover_communication_mb" in server_recover_timing:
                 communication_sizes.append(server_recover_timing["server_recover_communication_mb"])
             

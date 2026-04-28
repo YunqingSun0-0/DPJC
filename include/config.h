@@ -12,6 +12,8 @@ struct GlobalConfig {
     */
     int port = 20929;
     int party = 0;
+    std::string server1_host = "127.0.0.1";
+    std::string server2_host = "127.0.0.1";
 
     int universal_set_size = 1<<24, universal_set_size_bit = 24;
     int seed_size = 1<<8, seed_size_bit = 8;

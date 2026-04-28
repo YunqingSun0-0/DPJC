@@ -13,8 +13,10 @@ void run_server(int server_id) {
     GlobalConfig& config = get_config();
     int port = config.port;
 
+    const char* peer_host = server_id == 1 ? nullptr : config.server1_host.c_str();
+
     std::cout << "Starting Server " << server_id << " on port " << port << std::endl;
-    emp::NetIO* server_io = new emp::NetIO(server_id == 1 ? nullptr : "127.0.0.1", port);
+    emp::NetIO* server_io = new emp::NetIO(peer_host, port);
     
     // 创建与clients的连接
     std::vector<emp::NetIO*> client_connections;
@@ -52,7 +54,7 @@ int main(int argc, char** argv) {
         if (arg == "-p" && i + 1 < argc) {
             server_id = std::atoi(argv[++i]);
         } else if(arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " -p <1|2> [-port <port>] [--num_clients_per_server=<n>]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " -p <1|2> [-port <port>] [--num_clients_per_server=<n>] [--server1_host=<host>] [--server2_host=<host>]" << std::endl;
             std::cout << "  Server IDs: 1 or 2" << std::endl;
             return 1;
         }
@@ -60,7 +62,7 @@ int main(int argc, char** argv) {
 
     // 验证server ID
     if (server_id != 1 && server_id != 2) {
-        std::cerr << "Usage: " << argv[0] << " -p <1|2> [-port <port>] [--num_clients_per_server=<n>]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " -p <1|2> [-port <port>] [--num_clients_per_server=<n>] [--server1_host=<host>] [--server2_host=<host>]" << std::endl;
         std::cerr << "  Server IDs: 1 or 2" << std::endl;
         return 1;
     }

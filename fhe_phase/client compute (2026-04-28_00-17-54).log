@@ -1,0 +1,144 @@
+[2026-04-28 00:17:54] ==========================================================
+[2026-04-28 00:17:54] FHE Client Compute Time Test
+[2026-04-28 00:17:54] ==========================================================
+[2026-04-28 00:17:54] Client sizes: 1, 16, 256, 4096
+[2026-04-28 00:17:54] PRG DD values: 4, 5, 6, 7, 8
+[2026-04-28 00:17:54] Runs to average per test: 1
+[2026-04-28 00:17:54] Logs:
+[2026-04-28 00:17:54]   - Full log: /home/ysk3460/psi-code/fhe_phase/client compute (2026-04-28_00-17-54).log
+[2026-04-28 00:17:54]   - Analysis log: /home/ysk3460/psi-code/fhe_phase/client compute (2026-04-28_00-17-54)_analysis.log
+[2026-04-28 00:17:54] ==========================================================
+[2026-04-28 00:17:54] 
+[2026-04-28 00:17:54] --- Testing with PRG_DD=4 ---
+[2026-04-28 00:17:54] Running test: client_size=2^0=1, prg_dd=4, runs=1
+[2026-04-28 00:17:54]   Run 1/1: starting
+[2026-04-28 00:17:56] [RESULT] Timing Results:
+[2026-04-28 00:17:56] [RESULT]   [Key generation]
+[2026-04-28 00:17:56] [RESULT]     key_gen_server_time_1: 0.724 s
+[2026-04-28 00:17:56] [RESULT]     key_gen_comm_mb: 26.1895 MB
+[2026-04-28 00:17:56] [RESULT]     broadcast_comm_mb: 28.0879 MB
+[2026-04-28 00:17:56] [RESULT]   [Client compute]
+[2026-04-28 00:17:56] [RESULT]     client_compute_time_3: 0.017 s
+[2026-04-28 00:17:56] [RESULT]     client_compute_time_4: 0.017 s
+[2026-04-28 00:17:56] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:17:56] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:17:56] [RESULT]   [Aggregation]
+[2026-04-28 00:17:56] [RESULT]     aggregation_time_ms_1: 0.043 ms
+[2026-04-28 00:17:56] [RESULT]     aggregation_time_ms_2: 0.034 ms
+[2026-04-28 00:17:56] [RESULT]   [2PC]
+[2026-04-28 00:17:56] [RESULT]     server_2pc_time_1: 0.016 s
+[2026-04-28 00:17:56] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:17:56] [RESULT] ==================================================
+[2026-04-28 00:17:56] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:17:56] [RESULT] ==================================================
+[2026-04-28 00:17:56] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_test_0_4_1.log
+[2026-04-28 00:17:56]   Run 1/1: client_compute_time=0.017s
+[2026-04-28 00:17:56] ✓ Test passed - 2^0: avg=0.017000s (successful_runs=1, failed_runs=0)
+[2026-04-28 00:17:56] 
+[2026-04-28 00:17:56] --- Testing with PRG_DD=5 ---
+[2026-04-28 00:17:56] Running test: client_size=2^0=1, prg_dd=5, runs=1
+[2026-04-28 00:17:56]   Run 1/1: starting
+[2026-04-28 00:17:57] [RESULT] Timing Results:
+[2026-04-28 00:17:57] [RESULT]   [Key generation]
+[2026-04-28 00:17:57] [RESULT]     key_gen_server_time_1: 0.728 s
+[2026-04-28 00:17:57] [RESULT]     key_gen_comm_mb: 26.1926 MB
+[2026-04-28 00:17:57] [RESULT]     broadcast_comm_mb: 28.0907 MB
+[2026-04-28 00:17:57] [RESULT]   [Client compute]
+[2026-04-28 00:17:57] [RESULT]     client_compute_time_3: 0.022 s
+[2026-04-28 00:17:57] [RESULT]     client_compute_time_4: 0.021 s
+[2026-04-28 00:17:57] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:17:57] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:17:57] [RESULT]   [Aggregation]
+[2026-04-28 00:17:57] [RESULT]     aggregation_time_ms_1: 0.026 ms
+[2026-04-28 00:17:57] [RESULT]     aggregation_time_ms_2: 0.08 ms
+[2026-04-28 00:17:57] [RESULT]   [2PC]
+[2026-04-28 00:17:57] [RESULT]     server_2pc_time_1: 0.017 s
+[2026-04-28 00:17:57] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:17:57] [RESULT] ==================================================
+[2026-04-28 00:17:57] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:17:57] [RESULT] ==================================================
+[2026-04-28 00:17:57] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_test_0_5_1.log
+[2026-04-28 00:17:57]   Run 1/1: client_compute_time=0.021s
+[2026-04-28 00:17:57] ✓ Test passed - 2^0: avg=0.021000s (successful_runs=1, failed_runs=0)
+[2026-04-28 00:17:57] 
+[2026-04-28 00:17:57] --- Testing with PRG_DD=6 ---
+[2026-04-28 00:17:57] Running test: client_size=2^0=1, prg_dd=6, runs=1
+[2026-04-28 00:17:57]   Run 1/1: starting
+[2026-04-28 00:17:59] [RESULT] Timing Results:
+[2026-04-28 00:17:59] [RESULT]   [Key generation]
+[2026-04-28 00:17:59] [RESULT]     key_gen_server_time_1: 0.725 s
+[2026-04-28 00:17:59] [RESULT]     key_gen_comm_mb: 26.1925 MB
+[2026-04-28 00:17:59] [RESULT]     broadcast_comm_mb: 28.0916 MB
+[2026-04-28 00:17:59] [RESULT]   [Client compute]
+[2026-04-28 00:17:59] [RESULT]     client_compute_time_3: 0.027 s
+[2026-04-28 00:17:59] [RESULT]     client_compute_time_4: 0.027 s
+[2026-04-28 00:17:59] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:17:59] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:17:59] [RESULT]   [Aggregation]
+[2026-04-28 00:17:59] [RESULT]     aggregation_time_ms_1: 0.038 ms
+[2026-04-28 00:17:59] [RESULT]     aggregation_time_ms_2: 0.054 ms
+[2026-04-28 00:17:59] [RESULT]   [2PC]
+[2026-04-28 00:17:59] [RESULT]     server_2pc_time_1: 0.016 s
+[2026-04-28 00:17:59] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:17:59] [RESULT] ==================================================
+[2026-04-28 00:17:59] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:17:59] [RESULT] ==================================================
+[2026-04-28 00:17:59] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_test_0_6_1.log
+[2026-04-28 00:17:59]   Run 1/1: client_compute_time=0.027s
+[2026-04-28 00:17:59] ✓ Test passed - 2^0: avg=0.027000s (successful_runs=1, failed_runs=0)
+[2026-04-28 00:17:59] 
+[2026-04-28 00:17:59] --- Testing with PRG_DD=7 ---
+[2026-04-28 00:17:59] Running test: client_size=2^0=1, prg_dd=7, runs=1
+[2026-04-28 00:17:59]   Run 1/1: starting
+[2026-04-28 00:18:01] [RESULT] Timing Results:
+[2026-04-28 00:18:01] [RESULT]   [Key generation]
+[2026-04-28 00:18:01] [RESULT]     key_gen_server_time_1: 0.718 s
+[2026-04-28 00:18:01] [RESULT]     key_gen_comm_mb: 26.1884 MB
+[2026-04-28 00:18:01] [RESULT]     broadcast_comm_mb: 28.0866 MB
+[2026-04-28 00:18:01] [RESULT]   [Client compute]
+[2026-04-28 00:18:01] [RESULT]     client_compute_time_3: 0.031 s
+[2026-04-28 00:18:01] [RESULT]     client_compute_time_4: 0.032 s
+[2026-04-28 00:18:01] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:18:01] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:18:01] [RESULT]   [Aggregation]
+[2026-04-28 00:18:01] [RESULT]     aggregation_time_ms_1: 0.035 ms
+[2026-04-28 00:18:01] [RESULT]     aggregation_time_ms_2: 0.038 ms
+[2026-04-28 00:18:01] [RESULT]   [2PC]
+[2026-04-28 00:18:01] [RESULT]     server_2pc_time_1: 0.016 s
+[2026-04-28 00:18:01] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:18:01] [RESULT] ==================================================
+[2026-04-28 00:18:01] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:18:01] [RESULT] ==================================================
+[2026-04-28 00:18:01] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_test_0_7_1.log
+[2026-04-28 00:18:01]   Run 1/1: client_compute_time=0.031s
+[2026-04-28 00:18:01] ✓ Test passed - 2^0: avg=0.031000s (successful_runs=1, failed_runs=0)
+[2026-04-28 00:18:01] 
+[2026-04-28 00:18:01] --- Testing with PRG_DD=8 ---
+[2026-04-28 00:18:01] Running test: client_size=2^0=1, prg_dd=8, runs=1
+[2026-04-28 00:18:01]   Run 1/1: starting
+[2026-04-28 00:18:03] [RESULT] Timing Results:
+[2026-04-28 00:18:03] [RESULT]   [Key generation]
+[2026-04-28 00:18:03] [RESULT]     key_gen_server_time_1: 0.733 s
+[2026-04-28 00:18:03] [RESULT]     key_gen_comm_mb: 26.1896 MB
+[2026-04-28 00:18:03] [RESULT]     broadcast_comm_mb: 28.0886 MB
+[2026-04-28 00:18:03] [RESULT]   [Client compute]
+[2026-04-28 00:18:03] [RESULT]     client_compute_time_3: 0.037 s
+[2026-04-28 00:18:03] [RESULT]     client_compute_time_4: 0.039 s
+[2026-04-28 00:18:03] [RESULT]   [Client -> Server comm]
+[2026-04-28 00:18:03] [RESULT]     client_server_comm_mb: 0.25 MB
+[2026-04-28 00:18:03] [RESULT]   [Aggregation]
+[2026-04-28 00:18:03] [RESULT]     aggregation_time_ms_1: 0.022 ms
+[2026-04-28 00:18:03] [RESULT]     aggregation_time_ms_2: 0.043 ms
+[2026-04-28 00:18:03] [RESULT]   [2PC]
+[2026-04-28 00:18:03] [RESULT]     server_2pc_time_1: 0.016 s
+[2026-04-28 00:18:03] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-28 00:18:03] [RESULT] ==================================================
+[2026-04-28 00:18:03] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-28 00:18:03] [RESULT] ==================================================
+[2026-04-28 00:18:03] [RESULT] Log file saved to: /home/ysk3460/psi-code/fhe_phase/.temp_test_0_8_1.log
+[2026-04-28 00:18:03]   Run 1/1: client_compute_time=0.039s
+[2026-04-28 00:18:03] ✓ Test passed - 2^0: avg=0.039000s (successful_runs=1, failed_runs=0)
+[2026-04-28 00:18:03] 
+[2026-04-28 00:18:03] ==========================================================
+[2026-04-28 00:18:03] Test suite completed
+[2026-04-28 00:18:03] ==========================================================
