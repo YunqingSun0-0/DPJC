@@ -1,6 +1,6 @@
 # FHE Test Scripts — Goals and Usage
 
-A practical reference for the Python and bash scripts that drive the FHE PSI tests in this repo. For deeper background on the batch performance harness, see [FHE_TESTING_GUIDE.md](FHE_TESTING_GUIDE.md).
+A practical reference for the Python and bash scripts that drive the FHE PSI tests in this repo.
 
 ## Prerequisites
 
@@ -40,26 +40,26 @@ Exits 0 on pass, 1 on fail.
 
 
 ## Bash tests
-### `run_seed_tests.sh`
+### `fhe_run_seed_tests.sh`
 
 **Goal.** Sweep seed sizes and capture key-gen time and communication overhead. Supports LAN (single host) and a real two-machine WAN deployment with `tc`-based throttling via [`throttle.py`](throttle.py).
 
 **Local mode (default)** — wraps `fhe_test_single.py`:
 ```bash
-./run_seed_tests.sh                       # default seed bits = (10)
-./run_seed_tests.sh --seed-bits "6 7 8"   # custom sweep
-./run_seed_tests.sh --mode local --set-size-bit 5 --prg-dd 6
+./fhe_run_seed_tests.sh                       # default seed bits = (10)
+./fhe_run_seed_tests.sh --seed-bits "6 7 8"   # custom sweep
+./fhe_run_seed_tests.sh --mode local --set-size-bit 5 --prg-dd 6
 ```
 
 **WAN mode** — runs `psi_server`/`psi_client` directly with `--server1_host`/`--server2_host`. Run once on each machine, with `server1` started first:
 ```bash
 # On server 1 host
-./run_seed_tests.sh --mode wan --role server1 \
+./fhe_run_seed_tests.sh --mode wan --role server1 \
     --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
     --generate-data --seed-bits "6 8 10"
 
 # On server 2 host (same flags except --role)
-./run_seed_tests.sh --mode wan --role server2 \
+./fhe_run_seed_tests.sh --mode wan --role server2 \
     --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
     --generate-data --seed-bits "6 8 10"
 ```
@@ -76,30 +76,30 @@ Remove manually after a crashed run:
 python3 throttle.py -i auto -d
 ```
 
-### `run_client_compute_tests.sh`
+### `fhe_run_client_compute_tests.sh`
 
 **Goal.** Sweep `prg_dd ∈ {4,5,6,7,8}` against client sizes (`CLIENT_SIZES_BITS` array, currently just `0` → 1 element) and extract per-element client computation time. Each cell can be repeated N times and averaged — pass the run count as the first positional arg (default 1).
 
 ```bash
-./run_client_compute_tests.sh         # 1 run per cell (single data point)
-./run_client_compute_tests.sh 20      # 20 runs per cell, averaged
+./fhe_run_client_compute_tests.sh         # 1 run per cell (single data point)
+./fhe_run_client_compute_tests.sh 20      # 20 runs per cell, averaged
 ```
 Edit `CLIENT_SIZES_BITS` near the top to expand the size axis (the comment lists 0/4/8/12).
 
-### `run_agg_time.sh`
+### `fhe_run_agg_time.sh`
 
 **Goal.** Isolate the **client-results aggregation phase** and study how it scales with per-server client count. Greps `Client results aggregation time:` from server output and reports per-server values.
 
-Usage: `./run_agg_time.sh [CLIENTS_PER_SIDE]`
+Usage: `./fhe_run_agg_time.sh [CLIENTS_PER_SIDE]`
 
 | Knob | Where | Default | Meaning |
 |---|---|---|---|
 | `CLIENTS_PER_SIDE` | positional `$1` | `100` | Per-server client count |
 
 ```bash
-./run_agg_time.sh           # defaults: 100 clients/side, seed_bit=6
-./run_agg_time.sh 10        # 10 clients per side
-./run_agg_time.sh 1         # smallest setup (2 clients total)
+./fhe_run_agg_time.sh           # defaults: 100 clients/side, seed_bit=6
+./fhe_run_agg_time.sh 10        # 10 clients per side
+./fhe_run_agg_time.sh 1         # smallest setup (2 clients total)
 ```
 
 Logs land in `fhe_phase/agg_time_<CLIENTS_PER_SIDE>cps_{full,summary}_<timestamp>.log`.
@@ -108,7 +108,7 @@ Logs land in `fhe_phase/agg_time_<CLIENTS_PER_SIDE>cps_{full,summary}_<timestamp
 ## Common gotchas
 
 - **Binary location.** All scripts call `./bin/...` from the repo root. CMake builds in place — no separate `build/` directory.
-- **Lingering processes.** Failed runs can leave `psi_server`/`psi_client` holding ports. Use `pkill -f psi_server; pkill -f psi_client` or `./run_fhe_tests.sh clean`.
-- **WAN throttle.** `run_seed_tests.sh --mode wan` applies `tc` rules via `throttle.py`. If the script crashes mid-run, remove them manually with `python3 throttle.py -i <iface> -d`.
-- **Timeouts.** `fhe_test_single.py` defaults to `TIMEOUT_SECONDS = 7200` (2h); the batch harness defaults to `300s`. Bump them for very large set sizes.
+- **Lingering processes.** Failed runs can leave `psi_server`/`psi_client` holding ports. Use `pkill -f psi_server; pkill -f psi_client`.
+- **WAN throttle.** `fhe_run_seed_tests.sh --mode wan` applies `tc` rules via `throttle.py`. If the script crashes mid-run, remove them manually with `python3 throttle.py -i <iface> -d`.
+- **Timeouts.** `fhe_test_single.py` defaults to `TIMEOUT_SECONDS = 7200` (2h). Bump it for very large set sizes.
 - **Output regex coupling.** All extraction relies on exact log lines like `Key generation time: 1.234s` and `Client results aggregation time: ... ms (... us)`. Any change to the C++ logging format ([src/psi.cpp](src/psi.cpp)) will silently break the parsers.

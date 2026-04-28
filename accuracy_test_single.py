@@ -28,7 +28,7 @@ MOM_K = 2500
 MOM_T = 11
 
 # Test parameters
-VERBOSE = True
+VERBOSE = False  # toggled via --verbose / -v
 CLEANUP_AFTER_TEST = True
 TIMEOUT_SECONDS = 10  # Reduced timeout
 STREAM_PROCESS_OUTPUT = False  # Show server/client output in terminal for debugging
@@ -53,9 +53,13 @@ def stream_output(pipe, prefix, collector, level="INFO"):
         pipe.close()
 
 def log(message, level="INFO"):
-    """Print log message"""
-    if VERBOSE:
+    """Verbose-only log message. Errors always print so failures stay debuggable."""
+    if VERBOSE or level == "ERROR":
         print(f"[{level}] {message}")
+
+def status(message):
+    """High-level progress message — always printed, even in quiet mode."""
+    print(message)
 
 def kill_existing_processes():
     """Kill any existing PSI processes"""
@@ -153,7 +157,7 @@ def start_process(cmd, name):
     )
     process._stderr_thread = threading.Thread(
         target=stream_output,
-        args=(process.stderr, name, process._stderr_lines, "ERROR"),
+        args=(process.stderr, name, process._stderr_lines, "INFO"),
         daemon=True
     )
 
@@ -204,6 +208,7 @@ def extract_psi_size_from_output(processes):
 
 def generate_test_data():
     """Generate test data"""
+    status("  generating data ...")
     log("=" * 50)
     log("GENERATING TEST DATA")
     log("=" * 50)
@@ -252,6 +257,7 @@ def generate_test_data():
 
 def run_psi_test(server1_files, server2_files, psi_mode="naive"):
     """Run PSI test with servers and clients"""
+    status(f"  running PSI ({psi_mode}) ...")
     log("=" * 50)
     log(f"RUNNING PSI TEST ({psi_mode.upper()})")
     log("=" * 50)
@@ -321,22 +327,25 @@ def run_psi_test(server1_files, server2_files, psi_mode="naive"):
 
 def validate_results(expected_size, actual_size):
     """Validate test results"""
+    status("  validating results ...")
     log("=" * 50)
     log("VALIDATING RESULTS")
     log("=" * 50)
-    
+
     if actual_size is None:
         log("Could not extract PSI size from output", "ERROR")
         return False
-    
+
     tolerance = max(1, expected_size // 10)  # 10% tolerance
-    
+
     if abs(actual_size - expected_size) > tolerance:
         log(f"✗ Weighted intersection sum mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
+        status(f"  FAILED (expected={expected_size}, actual={actual_size})")
         return False
     else:
         log(f"✓ Weighted intersection sum is correct (within tolerance)")
         log(f"  Expected: {expected_size}, Actual: {actual_size}")
+        status(f"  PASSED (expected={expected_size}, actual={actual_size})")
         return True
 
 def cleanup():
@@ -448,64 +457,36 @@ def test_naive_fourwise_psi():
 
 def main():
     """Main function"""
-    log("Starting fast PSI tests...")
-    
+    parser = argparse.ArgumentParser(description="Single-config PSI accuracy smoke test.")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Stream all server/client output and per-step logs. "
+                             "Default is quiet — only high-level progress and errors.")
+    args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
+
+    status("Starting PSI accuracy tests")
+
+    tests = [
+        ("Test 1/3: naive PSI",          test_naive_psi),
+        ("Test 2/3: naive_uniform PSI",  test_naive_uniform_psi),
+        ("Test 3/3: naive_fourwise PSI", test_naive_fourwise_psi),
+    ]
+
     all_passed = True
-    # Run naive PSI test
-    log("\n" + "=" * 50)
-    log("TEST 1: NAIVE PSI")
-    log("=" * 50)
-    naive_success = test_naive_psi()
-    if naive_success:
-        log("=" * 50)
-        log("✓ NAIVE PSI TEST PASSED")
-        log("=" * 50)
-    else:
-        log("=" * 50)
-        log("✗ NAIVE PSI TEST FAILED")
-        log("=" * 50)
-
-    all_passed = all_passed and naive_success
-
-    # Run naive_uniform PSI test
-    log("\n" + "=" * 50)
-    log("TEST 2: NAIVE UNIFORM PSI")
-    log("=" * 50)
-    uniform_success = test_naive_uniform_psi()
-    
-    if uniform_success:
-        log("=" * 50)
-        log("✓ NAIVE UNIFORM PSI TEST PASSED")
-        log("=" * 50)
-    else:
-        log("=" * 50)
-        log("✗ NAIVE UNIFORM PSI TEST FAILED")
-        log("=" * 50)
-
-    all_passed = all_passed and uniform_success
-    # Run naive_uniform PSI test
-    log("\n" + "=" * 50)
-    log("TEST 3: NAIVE fourwise PSI")
-    log("=" * 50)
-    fourwise_success = test_naive_fourwise_psi()
-    if fourwise_success:
-        log("=" * 50)
-        log("✓ NAIVE fourwise PSI TEST PASSED")
-        log("=" * 50)
-    else:
-        log("=" * 50)
-        log("✗ NAIVE fourwise PSI TEST FAILED")
-        log("=" * 50)
-
-    all_passed = all_passed and fourwise_success
+    for label, fn in tests:
+        status(label)
+        ok = fn()
+        all_passed = all_passed and ok
 
     if all_passed:
-        log("\n✓ ALL TESTS PASSED")
+        status("All tests PASSED")
     else:
-        log("\n✗ SOME TESTS FAILED")
-    
+        status("Some tests FAILED")
+
     return all_passed
 
 if __name__ == "__main__":
     success = main()
-    sys.exit(0 if success else 1) 
+    sys.exit(0 if success else 1)

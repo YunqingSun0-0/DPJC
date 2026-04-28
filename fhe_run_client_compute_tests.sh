@@ -6,8 +6,8 @@
 # Pass the run count as the first positional arg (default 1).
 #
 # Examples:
-#   ./run_client_compute_tests.sh         # 1 run per cell (single data point)
-#   ./run_client_compute_tests.sh 20      # 20 runs per cell, averaged
+#   ./fhe_run_client_compute_tests.sh         # 1 run per cell (single data point)
+#   ./fhe_run_client_compute_tests.sh 20      # 20 runs per cell, averaged
 #
 # Creates two logs:
 #   1. client compute (<timestamp>).log          - Full log with every run

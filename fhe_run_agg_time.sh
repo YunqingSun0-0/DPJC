@@ -6,7 +6,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${REPO_DIR}/fhe_phase"
 TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
 
-# Usage: ./run_agg_time.sh [CLIENTS_PER_SIDE]
+# Usage: ./fhe_run_agg_time.sh [CLIENTS_PER_SIDE]
 #   $1 (optional)     per-server client count (default 100)
 #   SET_SIZE_BIT env  total set size = 2^SET_SIZE_BIT, distributed round-robin across clients.
 #                     If unset, auto-picks the smallest value such that 2^SET_SIZE_BIT >= CLIENTS_PER_SIDE
