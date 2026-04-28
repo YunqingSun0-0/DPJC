@@ -8,73 +8,27 @@ import os
 import sys
 import subprocess
 import time
-import signal
 import shutil
 import re
 import json
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import argparse
 
 # ==================== CONFIGURABLE PARAMETERS ====================
-# Fixed parameters
+# Fixed Default parameters
 UNIVERSAL_SIZE_BIT = 24
 SET_SIZE = 1 << 18  # 2^18
 INTERSECTION_SIZE = SET_SIZE // 2  # Half of set size
-NUM_CLIENTS_PER_SERVER = 4
-GENDATA_INPUT_FILE = "./uci_words/docword.nips.txt"  # e.g. "./uci_words/docword.kos.txt"; empty means random generation
-PORT_BASE = 21000  # Base port for tests
-
-# Parameter ranges by mode
-DEFAULT_TEST_MODE = "seed_optimization"
-TEST_MODES = {
-        "seed_optimization": {
-        "description": "Fix k,t and scan seed size under different d values.",
-        "prg_dd_values": [ 8],
-        "seed_size_bit_values": [9], 
-        "mom_k": 500,
-        "mom_t": 8,
-    },
-    "kttune": {
-        "description": "Tune t under fixed sketch-size budgets using k = kbsize*1024/8/t.",
-        "prg_dd_values": [7],
-        "kb_size_values_kb": [8, 16, 32, 64, 128],
-        "mom_t_values": [3, 5, 7, 9, 11, 13],
-        "k_formula": "k = (kb_size_kb * 1024) // (8 * t)",
-    },
-    "errorvsepsilon": {
-        "description": "Fixed d and t, scan k to study error vs epsilon.",
-        "prg_dd_values": [7],  # fixed d
-        "mom_k_values": [100, 200, 400, 1000, 2500, 10000],
-        "mom_t": 11,            # fixed t
-        "seed_size_bit_values": [7],
-    },
-}
-
-ACTIVE_TEST_MODE = DEFAULT_TEST_MODE
-PRG_DD_VALUES = []
-MOM_K_VALUES = []
-MOM_T = None
-MOM_KT_PAIRS = []
-PSI_MODES = ["naive"]
-PSI_MODE_DISPLAY_NAMES = {
-    "naive": "naive",
-    "naive_uniform": "naive_uniform",
-    "naive_fourwise": "four_wise",
-}
-NUM_RUNS_PER_POINT = 1000  # Total runs per parameter combination
-SEED_SIZE_BIT_VALUES = []
-FILTER_PRG_DD = None
-FILTER_MOM_K = None
-FILTER_MOM_T = None
-
+NUM_CLIENTS_PER_SERVER = 1
 # Test parameters
-TIMEOUT_SECONDS = 200
-VERBOSE = False
-
+TIMEOUT_SECONDS = 300  # For both data generation and PSI execution
+VERBOSE = True
+PORT_BASE = 21000  # Base port for tests
+NUM_RUNS_PER_POINT = 10  # Total runs per parameter combination
 # Output directories
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 BASE_RUN_DIR = f"./experiments/run_{RUN_TIMESTAMP}"
@@ -82,6 +36,66 @@ BASE_RUN_DIR = f"./experiments/run_{RUN_TIMESTAMP}"
 RESULTS_DIR = os.path.join(BASE_RUN_DIR, "results")
 DATA_DIR = os.path.join(BASE_RUN_DIR, "data")
 PLOTS_DIR = os.path.join(BASE_RUN_DIR, "plots")
+
+# Parameter ranges by mode
+DEFAULT_TEST_MODE = "seed_optimization"
+TEST_MODES = {
+    "seed_optimization": {
+        "description": "Fix k,t and scan seed size under different d values.",
+        "prg_dd_values": [5, 6, 7, 8],
+        "seed_size_bit_values": [6, 7, 8, 9],
+        "mom_k": 400,
+        "mom_t": 11,
+    },
+    "errorvsepsilon": {
+        "description": "Fixed d and t, scan k to study error vs epsilon.",
+        "prg_dd_values": [7],  # fixed d
+        "mom_k_values": [100, 200, 400, 1000, 2500, 10000],
+        "seed_size_bit_values": [6,7,8],
+    },
+    "maxsetsupport": {
+        "description": "Find maximum supported set-size exponent per (n,d,k,t) by iterative backoff.",
+        "prg_dd_values": [4, 5, 6, 7, 8],
+        "mom_k_values": [10000],
+        "seed_size_bit_values": [6,7,8,9,10],
+    },
+}
+
+# Max-set-support baseline exponents (total set size across both sides)
+MAXSETSUPPORT_SET_SIZE_EXPONENTS = {
+    64: {4: 12, 5: 15, 6: 18, 7: 21, 8: 24},
+    128: {4: 14, 5: 17, 6: 21, 7: 24},
+    256: {4: 16, 5: 20, 6: 24},
+    512: {4: 18, 5: 22},
+    1024: {4: 20},
+}
+MAXSETSUPPORT_N_VALUES = [64, 128, 256, 512, 1024]
+MAXSETSUPPORT_D_VALUES = [4, 5, 6, 7, 8]
+MAXSETSUPPORT_K_VALUES = [400]
+MAX_GENDATA_INT = (1 << 31) - 1
+MAX_GENDATA_UNIVERSAL_SIZE_BIT = 25
+
+
+ACTIVE_TEST_MODE = DEFAULT_TEST_MODE
+PRG_DD_VALUES = []
+MOM_K_VALUES = []
+MOM_T = None
+MOM_KT_PAIRS = []
+MOM_T_VALUES = []
+PSI_MODES = ["naive"]
+PSI_MODE_DISPLAY_NAMES = {
+    "naive": "naive",
+    "naive_uniform": "naive_uniform",
+    "naive_fourwise": "four_wise",
+}
+SEED_SIZE_BIT_VALUES = []
+#Parallel execution parameters
+FILTER_PRG_DD = None
+FILTER_MOM_K = None
+FILTER_MOM_T = None
+SKIP_KILL_EXISTING = False
+MAXSETSUPPORT_SKIP_BASELINE_ABOVE = None
+
 
 def set_run_directory(run_dir):
     """Set the run directory and update all related paths"""
@@ -91,40 +105,9 @@ def set_run_directory(run_dir):
     DATA_DIR = os.path.join(BASE_RUN_DIR, "data")
     PLOTS_DIR = os.path.join(BASE_RUN_DIR, "plots")
 
-# def apply_test_mode(mode_name):
-#     """Apply a named parameter mode to global scan settings."""
-#     global ACTIVE_TEST_MODE, PRG_DD_VALUES, MOM_K_VALUES, MOM_T, MOM_KT_PAIRS, PSI_MODES
-#     if mode_name not in TEST_MODES:
-#         raise ValueError(f"Unknown test mode: {mode_name}")
-
-#     mode_cfg = TEST_MODES[mode_name]
-#     ACTIVE_TEST_MODE = mode_name
-#     PRG_DD_VALUES = list(mode_cfg["prg_dd_values"])
-#     MOM_KT_PAIRS = []
-
-#     if "kt_factor_pairs" in mode_cfg:
-#         kt_values = mode_cfg.get("kt_values", sorted(mode_cfg["kt_factor_pairs"].keys()))
-#         for kt in kt_values:
-#             for mom_k, mom_t in mode_cfg["kt_factor_pairs"].get(kt, []):
-#                 MOM_KT_PAIRS.append((int(mom_k), int(mom_t)))
-#     elif "kb_size_values_kb" in mode_cfg and "mom_t_values" in mode_cfg:
-#         for kb_size_kb in mode_cfg["kb_size_values_kb"]:
-#             for mom_t in mode_cfg["mom_t_values"]:
-#                 mom_t = int(mom_t)
-#                 mom_k = (int(kb_size_kb) * 1024) // (8 * mom_t)
-#                 if mom_k > 0:
-#                     MOM_KT_PAIRS.append((mom_k, mom_t))
-#     else:
-#         mom_t = int(mode_cfg["mom_t"])
-#         for mom_k in mode_cfg["mom_k_values"]:
-#             MOM_KT_PAIRS.append((int(mom_k), mom_t))
-
-#     MOM_K_VALUES = sorted({mom_k for mom_k, _ in MOM_KT_PAIRS})
-#     MOM_T = MOM_KT_PAIRS[0][1] if MOM_KT_PAIRS else None
-#     PSI_MODES = ["naive", "naive_uniform", "naive_fourwise"] if mode_name == "errorvsepsilon" else ["naive"]
 def apply_test_mode(mode_name):
     """Apply a named parameter mode to global scan settings."""
-    global ACTIVE_TEST_MODE, PRG_DD_VALUES, MOM_K_VALUES, MOM_T, MOM_KT_PAIRS, PSI_MODES, SEED_SIZE_BIT_VALUES
+    global ACTIVE_TEST_MODE, PRG_DD_VALUES, MOM_K_VALUES, MOM_T, MOM_KT_PAIRS, MOM_T_VALUES, PSI_MODES, SEED_SIZE_BIT_VALUES
 
     if mode_name not in TEST_MODES:
         raise ValueError(f"Unknown test mode: {mode_name}")
@@ -133,7 +116,12 @@ def apply_test_mode(mode_name):
     ACTIVE_TEST_MODE = mode_name
     PRG_DD_VALUES = list(mode_cfg["prg_dd_values"])
     MOM_KT_PAIRS = []
+    raw_t_values = mode_cfg.get("mom_t_values")
+    if raw_t_values is None and "mom_t" in mode_cfg:
+        raw_t_values = [mode_cfg["mom_t"]]
+    MOM_T_VALUES = [int(v) for v in (raw_t_values or [])]
     SEED_SIZE_BIT_VALUES = list(mode_cfg.get("seed_size_bit_values", []))
+    t_options = MOM_T_VALUES if MOM_T_VALUES else [None]
 
     if mode_name == "seed_optimization":
         MOM_KT_PAIRS.append((int(mode_cfg["mom_k"]), int(mode_cfg["mom_t"])))
@@ -142,25 +130,25 @@ def apply_test_mode(mode_name):
         for kt in kt_values:
             for mom_k, mom_t in mode_cfg["kt_factor_pairs"].get(kt, []):
                 MOM_KT_PAIRS.append((int(mom_k), int(mom_t)))
-    elif "kb_size_values_kb" in mode_cfg and "mom_t_values" in mode_cfg:
-        for kb_size_kb in mode_cfg["kb_size_values_kb"]:
-            for mom_t in mode_cfg["mom_t_values"]:
-                mom_t = int(mom_t)
-                mom_k = (int(kb_size_kb) * 1024) // (8 * mom_t)
-                if mom_k > 0:
-                    MOM_KT_PAIRS.append((mom_k, mom_t))
+        MOM_T_VALUES = sorted({int(mom_t) for _, mom_t in MOM_KT_PAIRS})
     else:
-        mom_t = int(mode_cfg["mom_t"])
         for mom_k in mode_cfg["mom_k_values"]:
-            MOM_KT_PAIRS.append((int(mom_k), mom_t))
+            for mom_t in t_options:
+                MOM_KT_PAIRS.append((int(mom_k), mom_t))
 
     MOM_K_VALUES = sorted({mom_k for mom_k, _ in MOM_KT_PAIRS})
-    MOM_T = MOM_KT_PAIRS[0][1] if MOM_KT_PAIRS else None
+    if MOM_KT_PAIRS:
+        first_t = MOM_KT_PAIRS[0][1]
+        MOM_T = get_valid_mom_t(first_t)
+    else:
+        MOM_T = None
 
     if mode_name == "seed_optimization":
         PSI_MODES = ["naive"]
     elif mode_name == "errorvsepsilon":
         PSI_MODES = ["naive", "naive_uniform"]
+    elif mode_name == "maxsetsupport":
+        PSI_MODES = ["naive"]
     else:
         PSI_MODES = ["naive"]
 
@@ -170,6 +158,7 @@ def save_run_metadata():
     "mode": ACTIVE_TEST_MODE,
     "mode_config": TEST_MODES[ACTIVE_TEST_MODE],
     "mom_kt_pairs": MOM_KT_PAIRS,
+    "mom_t_values": MOM_T_VALUES,
     "seed_size_bit_values": SEED_SIZE_BIT_VALUES,
     "psi_modes": PSI_MODES,
     "num_runs_per_point": NUM_RUNS_PER_POINT,
@@ -184,39 +173,20 @@ def save_run_metadata():
         "mom_t": FILTER_MOM_T,
     },
     }
+    if ACTIVE_TEST_MODE == "maxsetsupport":
+        metadata["maxsetsupport"] = {
+            "baseline_set_size_exponents": MAXSETSUPPORT_SET_SIZE_EXPONENTS,
+            "rule": "total size is across two clients; each side uses half",
+            "support_threshold_rule": "actual_error <= 1/sqrt(k)",
+            "k_values": MAXSETSUPPORT_K_VALUES,
+            "skip_baseline_above_exponent": MAXSETSUPPORT_SKIP_BASELINE_ABOVE,
+        }
     metadata_file = f"{RESULTS_DIR}/run_metadata.json"
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2)
     log(f"Run metadata saved to {metadata_file}")
 
-def get_default_seed_size_from_cpp_config():
-    """Read default seed size from include/config.h (GlobalConfig initializer)."""
-    config_header = os.path.join(os.path.dirname(os.path.abspath(__file__)), "include", "config.h")
-    try:
-        with open(config_header, "r", encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
-        return None, None, config_header
-
-    match = re.search(
-        r"seed_size\s*=\s*([^,;]+)\s*,\s*seed_size_bit\s*=\s*(\d+)",
-        text
-    )
-    if not match:
-        return None, None, config_header
-
-    seed_expr = match.group(1).strip()
-    seed_bit = int(match.group(2))
-
-    # Prefer bit-derived value, and parse common "1<<N" expression if present.
-    seed_size = 1 << seed_bit
-    expr_match = re.search(r"1\s*<<\s*(\d+)", seed_expr)
-    if expr_match:
-        seed_size = 1 << int(expr_match.group(1))
-
-    return seed_size, seed_bit, config_header
-
-def log_errorvsepsilon_seed_size_once():
+def log_config_seedsize():
     """
     Log seed-size behavior for errorvsepsilon mode.
     """
@@ -227,18 +197,107 @@ def log_errorvsepsilon_seed_size_once():
             f"[errorvsepsilon] using explicit seed_size_bit_values={SEED_SIZE_BIT_VALUES}"
         )
         return
-    seed_size, seed_size_bit, config_header = get_default_seed_size_from_cpp_config()
-    if seed_size is None or seed_size_bit is None:
+
+    config_header = os.path.join(os.path.dirname(os.path.abspath(__file__)), "include", "config.h")
+    try:
+        with open(config_header, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
         log(
             "[errorvsepsilon] seed_size from config: <unknown> "
             f"(failed to parse {config_header})",
             "WARNING"
         )
         return
+
+    match = re.search(
+        r"seed_size\s*=\s*([^,;]+)\s*,\s*seed_size_bit\s*=\s*(\d+)",
+        text
+    )
+    if not match:
+        log(
+            "[errorvsepsilon] seed_size from config: <unknown> "
+            f"(failed to parse {config_header})",
+            "WARNING"
+        )
+        return
+
+    seed_expr = match.group(1).strip()
+    seed_size_bit = int(match.group(2))
+
+    # Prefer bit-derived value, and parse common "1<<N" expression if present.
+    seed_size = 1 << seed_size_bit
+    expr_match = re.search(r"1\s*<<\s*(\d+)", seed_expr)
+    if expr_match:
+        seed_size = 1 << int(expr_match.group(1))
+
     log(
         f"[errorvsepsilon] seed_size from config: {seed_size} "
         f"(seed_size_bit={seed_size_bit}, source={config_header})"
     )
+
+def get_valid_mom_t(mom_t=None):
+    """Resolve a valid mom_t: explicit value or config.h default (fallback 11)."""
+    if mom_t is not None:
+        return int(mom_t)
+
+    config_header = os.path.join(os.path.dirname(os.path.abspath(__file__)), "include", "config.h")
+    try:
+        with open(config_header, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return 11
+
+    match = re.search(r"mom_tt\s*=\s*(\d+)", text)
+    return int(match.group(1)) if match else 11
+
+def get_maxsetsupport_total_set_size(seed_size, prg_dd, exponent_override=None):
+    """Return total set size for (n,d), using baseline exponent or override."""
+    exponent = exponent_override
+    if exponent is None:
+        exponent = MAXSETSUPPORT_SET_SIZE_EXPONENTS.get(int(seed_size), {}).get(int(prg_dd))
+    if exponent is None:
+        return None, None
+    return 1 << int(exponent), int(exponent)
+
+def get_maxsetsupport_generation_params(total_set_size):
+    """
+    Convert total set size to gendata parameters.
+    Total size is across two clients; each side gets half.
+    """
+    if total_set_size is None or total_set_size <= 0:
+        return False, {"reason": "invalid_total_set_size"}
+
+    if total_set_size % 2 != 0:
+        return False, {"reason": "odd_total_set_size"}
+
+    set_size_per_server = total_set_size // 2
+    intersection_size = set_size_per_server // 2
+    required_universal_size = 2 * set_size_per_server - intersection_size
+    required_universal_bit = max(
+        UNIVERSAL_SIZE_BIT,
+        int(max(2, required_universal_size - 1)).bit_length()
+    )
+
+    if set_size_per_server > MAX_GENDATA_INT:
+        return False, {
+            "reason": "set_size_exceeds_int32",
+            "set_size_per_server": set_size_per_server,
+            "max_set_size": MAX_GENDATA_INT,
+        }
+
+    if required_universal_bit > MAX_GENDATA_UNIVERSAL_SIZE_BIT:
+        return False, {
+            "reason": "required_universal_size_bit_too_large",
+            "required_universal_size_bit": required_universal_bit,
+            "max_universal_size_bit": MAX_GENDATA_UNIVERSAL_SIZE_BIT,
+        }
+
+    return True, {
+        "set_size_per_server": set_size_per_server,
+        "intersection_size": intersection_size,
+        "universal_size_bit": required_universal_bit,
+    }
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -251,6 +310,20 @@ def ensure_directories():
     """Ensure all required directories exist"""
     for directory in [RESULTS_DIR, DATA_DIR, PLOTS_DIR]:
         os.makedirs(directory, exist_ok=True)
+
+def compute_median_abs_error(test_results):
+    """Return median absolute error_ratio for a list of run results."""
+    if not test_results:
+        return None
+    errors = []
+    for row in test_results:
+        try:
+            errors.append(abs(float(row["error_ratio"])))
+        except Exception:
+            continue
+    if not errors:
+        return None
+    return float(np.median(errors))
 
 def kill_existing_processes():
     """Kill any existing PSI processes"""
@@ -278,40 +351,6 @@ def run_command(cmd, description=""):
     except Exception as e:
         log(f"✗ {description or cmd} failed with exception: {e}", "ERROR")
         return False, str(e)
-
-def read_weighted_set_from_file(filename):
-    """Read a weighted set from file as value -> weight."""
-    if not os.path.exists(filename):
-        return {}
-
-    values = {}
-    with open(filename, 'r') as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            value = int(parts[0])
-            weight = int(parts[1]) if len(parts) > 1 else 1
-            values[value] = weight
-    return values
-
-def merge_weighted_sets(weighted_sets):
-    """Merge multiple client sets into one value -> summed weight map."""
-    merged = {}
-    for weighted_set in weighted_sets:
-        for value, weight in weighted_set.items():
-            merged[value] = merged.get(value, 0) + weight
-    return merged
-
-def compute_weighted_intersection_sum(server1_weights, server2_weights):
-    """Compute sum of weight products over the shared values."""
-    total = 0
-    for value, weight1 in server1_weights.items():
-        weight2 = server2_weights.get(value)
-        if weight2 is not None:
-            total += weight1 * weight2
-    return total
 
 def start_process(cmd, description):
     """Start a process in background"""
@@ -355,19 +394,36 @@ def extract_psi_size_from_output(processes):
 
 # ==================== DATA GENERATION ====================
 
-def generate_test_data(test_id, prg_dd, mom_k):
+def generate_test_data(
+    test_id,
+    prg_dd,
+    mom_k,
+    set_size_override=None,
+    intersection_size_override=None,
+    universal_size_bit_override=None,
+):
     """Generate test data for a specific test"""
     test_data_dir = f"{DATA_DIR}/test_{test_id:06d}"
     os.makedirs(test_data_dir, exist_ok=True)
     
     # Generate test data
-    cmd = f"./bin/gendata --intersection_size={INTERSECTION_SIZE} " \
-          f"--universal_size_bit={UNIVERSAL_SIZE_BIT} " \
+    set_size = int(set_size_override) if set_size_override is not None else int(SET_SIZE)
+    intersection_size = (
+        int(intersection_size_override)
+        if intersection_size_override is not None
+        else int(INTERSECTION_SIZE)
+    )
+    universal_size_bit = (
+        int(universal_size_bit_override)
+        if universal_size_bit_override is not None
+        else int(UNIVERSAL_SIZE_BIT)
+    )
+
+    cmd = f"./bin/gendata --intersection_size={intersection_size} " \
+          f"--universal_size_bit={universal_size_bit} " \
           f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
-          f"--set_size={SET_SIZE} " \
+          f"--set_size={set_size} " \
           f"--output_dir={test_data_dir}"
-    if GENDATA_INPUT_FILE:
-        cmd += f" --uci_data_file={GENDATA_INPUT_FILE}"
     
     success, output = run_command(cmd, f"Data generation for test {test_id}")
     if not success:
@@ -384,30 +440,52 @@ def generate_test_data(test_id, prg_dd, mom_k):
             log(f"Error: Generated data file not found: {file}", "ERROR")
             return False, None
     
-    # Read all sets and calculate expected weighted intersection sum
+    # Read all sets and calculate expected intersection
     server1_sets = []
     server2_sets = []
     
     for f in server1_files:
-        server1_sets.append(read_weighted_set_from_file(f))
+        with open(f, 'r') as file:
+            server1_sets.append(set(int(line.strip()) for line in file if line.strip()))
     
     for f in server2_files:
-        server2_sets.append(read_weighted_set_from_file(f))
-
-    all_server1_weights = merge_weighted_sets(server1_sets)
-    all_server2_weights = merge_weighted_sets(server2_sets)
-    expected_intersection_size = compute_weighted_intersection_sum(all_server1_weights, all_server2_weights)
+        with open(f, 'r') as file:
+            server2_sets.append(set(int(line.strip()) for line in file if line.strip()))
+    
+    # Calculate intersection across all clients
+    all_server1_elements = set()
+    all_server2_elements = set()
+    
+    for s in server1_sets:
+        all_server1_elements.update(s)
+    for s in server2_sets:
+        all_server2_elements.update(s)
+    
+    expected_intersection = all_server1_elements.intersection(all_server2_elements)
+    expected_intersection_size = len(expected_intersection)
     
     return True, {
         'test_data_dir': test_data_dir,
         'expected_intersection_size': expected_intersection_size,
         'server1_files': server1_files,
-        'server2_files': server2_files
+        'server2_files': server2_files,
+        'set_size_per_server': set_size,
+        'intersection_size': intersection_size,
+        'universal_size_bit': universal_size_bit,
     }
 
 # ==================== SINGLE TEST EXECUTION ====================
 
-def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="naive", seed_size_bit=None):
+def run_single_test(
+    test_id,
+    prg_dd,
+    mom_k,
+    mom_t,
+    test_data_info,
+    psi_mode="naive",
+    seed_size_bit=None,
+    return_error=False,
+):
     """Run a single PSI test"""
     test_data_dir = test_data_info['test_data_dir']
     expected_intersection_size = test_data_info['expected_intersection_size']
@@ -421,21 +499,21 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
     # server1_cmd = f"./bin/psi_server -p 1 --port={port} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
     # server2_cmd = f"./bin/psi_server -p 2 --port={port} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
     
+    effective_mom_t = get_valid_mom_t(mom_t)
     seed_arg = f" --seed_size_bit={seed_size_bit}" if seed_size_bit is not None else ""
+    mom_t_arg = f" --mom_t={mom_t}" if mom_t is not None else ""
 
     server1_cmd = (
         f"./bin/psi_server -p 1 --port={port} --psi_mode={psi_mode} "
         f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode "
-        f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
-        f"--mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
+        f"--mom_k={mom_k}{mom_t_arg} --prg_dd={prg_dd}"
         f"{seed_arg}"
     )
 
     server2_cmd = (
         f"./bin/psi_server -p 2 --port={port} --psi_mode={psi_mode} "
         f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode "
-        f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
-        f"--mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
+        f"--mom_k={mom_k}{mom_t_arg} --prg_dd={prg_dd}"
         f"{seed_arg}"
     )
     # server1_cmd = f"./bin/psi_server -p 1 --port={port} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd} --seed_size_bit={seed_size_bit}"
@@ -455,8 +533,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
         client_cmd = (
             f"./bin/psi_client -p {client_id} --port={port} --data_file={data_file} "
             f"--psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} "
-            f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
-            f"--test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
+            f"--test_mode --mom_k={mom_k}{mom_t_arg} --prg_dd={prg_dd}"
             f"{seed_arg}"
         )
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1, test {test_id})")
@@ -469,8 +546,7 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
         client_cmd = (
             f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} --data_file={data_file} "
             f"--psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} "
-            f"--universal_set_size_bit={UNIVERSAL_SIZE_BIT} "
-            f"--test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd}"
+            f"--test_mode --mom_k={mom_k}{mom_t_arg} --prg_dd={prg_dd}"
             f"{seed_arg}"
         )
         # client_cmd = f"./bin/psi_client -p {client_id + NUM_CLIENTS_PER_SERVER} --port={port} --data_file={data_file} --psi_mode={psi_mode} --num_clients_per_server={NUM_CLIENTS_PER_SERVER} --test_mode --mom_k={mom_k} --mom_t={mom_t} --prg_dd={prg_dd} --seed_size_bit={seed_size_bit}"
@@ -484,12 +560,16 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
     
     if not success:
         log(f"Test {test_id} did not complete within timeout", "ERROR")
+        if return_error:
+            return False, None, "timeout"
         return False, None
     
     # Check if all processes completed successfully
     for i, process in enumerate(all_processes):
         if process.returncode != 0:
             log(f"Test {test_id} process {i+1} failed with return code {process.returncode}", "ERROR")
+            if return_error:
+                return False, None, f"process_{i+1}_returncode_{process.returncode}"
             return False, None
     
     # Extract PSI size from server output
@@ -497,6 +577,8 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
     
     if actual_intersection_size is None:
         log(f"Test {test_id} could not extract PSI size", "ERROR")
+        if return_error:
+            return False, None, "psi_size_parse_failed"
         return False, None
     
     # Calculate error ratio
@@ -513,19 +595,25 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
         'psi_mode_display': PSI_MODE_DISPLAY_NAMES.get(psi_mode, psi_mode),
         'prg_dd': prg_dd,
         'mom_k': mom_k,
-        'mom_t': mom_t,
-        'kt': mom_k * mom_t,
-        'plain_sketct_size': (mom_k * mom_t * 8) / 1024.0,
+        'mom_t': effective_mom_t,
+        'kt': mom_k * effective_mom_t,
+        'plain_sketct_size': (mom_k * effective_mom_t * 8) / 1024.0,
         'expected_intersection_size': expected_intersection_size,
         'actual_intersection_size': actual_intersection_size,
         'error_ratio': error_ratio,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'set_size_per_server': test_data_info.get('set_size_per_server'),
+        'total_set_size': test_data_info.get('total_set_size'),
+        'intersection_size': test_data_info.get('intersection_size'),
+        'universal_size_bit': test_data_info.get('universal_size_bit'),
     }
 
     if seed_size_bit is not None:
         result['seed_size_bit'] = seed_size_bit
         result['seed_size'] = 1 << seed_size_bit
 
+    if return_error:
+        return True, result, None
     return True, result
 
 # ==================== BATCH TESTING ====================
@@ -535,10 +623,24 @@ def run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode="nai
 #     mode_name = mode_name or ACTIVE_TEST_MODE
 #     return f"mode_{mode_name}_psi_{psi_mode}_prg_dd_{prg_dd}_mom_k_{mom_k}_mom_t_{mom_t}"
 
-def get_test_key(prg_dd, mom_k, mom_t, seed_size_bit=None, mode_name=None, psi_mode="naive"):
+def get_test_key(
+    prg_dd,
+    mom_k,
+    mom_t,
+    seed_size_bit=None,
+    mode_name=None,
+    psi_mode="naive",
+    total_set_size_exponent=None,
+):
     """Get unique key for a parameter combination"""
     mode_name = mode_name or ACTIVE_TEST_MODE
-    return f"mode_{mode_name}_psi_{psi_mode}_prg_dd_{prg_dd}_mom_k_{mom_k}_mom_t_{mom_t}_seedbit_{seed_size_bit}"
+    key = (
+        f"mode_{mode_name}_psi_{psi_mode}_prg_dd_{prg_dd}_mom_k_{mom_k}"
+        f"_mom_t_{mom_t}_seedbit_{seed_size_bit}"
+    )
+    if total_set_size_exponent is not None:
+        key += f"_setexp_{int(total_set_size_exponent)}"
+    return key
 
 def iter_filtered_param_pairs():
     """Yield active (prg_dd, mom_k, mom_t) tuples after optional CLI filters."""
@@ -548,7 +650,8 @@ def iter_filtered_param_pairs():
         for mom_k, mom_t in MOM_KT_PAIRS:
             if FILTER_MOM_K is not None and mom_k != FILTER_MOM_K:
                 continue
-            if FILTER_MOM_T is not None and mom_t != FILTER_MOM_T:
+            effective_mom_t = get_valid_mom_t(mom_t)
+            if FILTER_MOM_T is not None and effective_mom_t != FILTER_MOM_T:
                 continue
             yield prg_dd, mom_k, mom_t
 
@@ -567,71 +670,6 @@ def save_results(results):
         json.dump(results, f, indent=2)
     log(f"Results saved to {results_file}")
 
-# def run_batch_tests():
-#     """Run batch tests for all parameter combinations"""
-#     log("Starting batch tests...")
-    
-#     # Load existing results
-#     results = load_existing_results()
-#     save_run_metadata()
-    
-#     # Check if executables exist
-#     required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
-#     for file in required_files:
-#         if not os.path.exists(file):
-#             log(f"Error: {file} not found. Please build the project first.", "ERROR")
-#             return False
-    
-#     # Kill any existing PSI processes before starting
-#     kill_existing_processes()
-    
-#     test_id = 0
-#     total_tests = len(PSI_MODES) * len(PRG_DD_VALUES) * len(MOM_KT_PAIRS) * NUM_RUNS_PER_POINT
-#     completed_tests = 0
-    
-#     for psi_mode in PSI_MODES:
-#         for prg_dd in PRG_DD_VALUES:
-#             for mom_k, mom_t in MOM_KT_PAIRS:
-#                 test_key = get_test_key(prg_dd, mom_k, mom_t, psi_mode=psi_mode)
-
-#                 if test_key in results and len(results[test_key]) >= NUM_RUNS_PER_POINT:
-#                     log(f"Skipping completed parameter combination: psi_mode={psi_mode}, prg_dd={prg_dd}, mom_k={mom_k}, mom_t={mom_t}")
-#                     completed_tests += NUM_RUNS_PER_POINT
-#                     continue
-
-#                 if test_key not in results:
-#                     results[test_key] = []
-
-#                 log(f"Testing psi_mode={psi_mode}, prg_dd={prg_dd}, mom_k={mom_k}, mom_t={mom_t} (completed: {len(results[test_key])}/{NUM_RUNS_PER_POINT})")
-
-#                 for run in range(len(results[test_key]), NUM_RUNS_PER_POINT):
-#                     test_id += 1
-#                     completed_tests += 1
-
-#                     log(f"Running test {test_id}/{total_tests} (run {run+1}/{NUM_RUNS_PER_POINT})")
-
-#                     success, test_data_info = generate_test_data(test_id, prg_dd, mom_k)
-#                     if not success:
-#                         log(f"Failed to generate test data for test {test_id}", "ERROR")
-#                         continue
-
-#                     success, test_result = run_single_test(test_id, prg_dd, mom_k, mom_t, test_data_info, psi_mode=psi_mode)
-#                     if success and test_result:
-#                         results[test_key].append(test_result)
-#                         save_results(results)
-#                         log(f"Test {test_id} completed successfully. psi_mode={psi_mode}, error ratio: {test_result['error_ratio']:.3f}")
-#                     else:
-#                         log(f"Test {test_id} failed", "ERROR")
-
-#                     if os.path.exists(test_data_info['test_data_dir']):
-#                         shutil.rmtree(test_data_info['test_data_dir'])
-
-#                     progress = (completed_tests / total_tests) * 100
-#                     log(f"Progress: {progress:.1f}% ({completed_tests}/{total_tests})")
-    
-#     log("Batch tests completed!")
-#     return True
-
 def run_batch_tests():
     """Run batch tests for all parameter combinations"""
     log("Starting batch tests...")
@@ -645,7 +683,10 @@ def run_batch_tests():
             log(f"Error: {file} not found. Please build the project first.", "ERROR")
             return False
 
-    kill_existing_processes()
+    if SKIP_KILL_EXISTING:
+        log("Skipping global PSI process cleanup (--skip-kill-existing enabled)")
+    else:
+        kill_existing_processes()
 
     test_id = 0
     pair_list = list(iter_filtered_param_pairs())
@@ -658,6 +699,9 @@ def run_batch_tests():
 
     if ACTIVE_TEST_MODE == "seed_optimization":
         total_tests = len(PSI_MODES) * len(pair_list) * len(SEED_SIZE_BIT_VALUES) * NUM_RUNS_PER_POINT
+    elif ACTIVE_TEST_MODE == "maxsetsupport":
+        # Baseline count (actual count may be higher if exponent reductions are needed)
+        total_tests = len(PSI_MODES) * len(pair_list) * len(SEED_SIZE_BIT_VALUES) * NUM_RUNS_PER_POINT
     elif ACTIVE_TEST_MODE == "errorvsepsilon":
         seed_size_bit_options = SEED_SIZE_BIT_VALUES if SEED_SIZE_BIT_VALUES else [None]
         total_tests = len(PSI_MODES) * len(pair_list) * len(seed_size_bit_options) * NUM_RUNS_PER_POINT
@@ -665,7 +709,7 @@ def run_batch_tests():
         total_tests = len(PSI_MODES) * len(pair_list) * NUM_RUNS_PER_POINT
     completed_tests = 0
 
-        # ===== special handling for seed_optimization =====
+    # ===== special handling for seed_optimization =====
     if ACTIVE_TEST_MODE == "seed_optimization":
         for psi_mode in PSI_MODES:
             for prg_dd, mom_k, mom_t in pair_list:
@@ -730,6 +774,229 @@ def run_batch_tests():
 
                         progress = (completed_tests / total_tests) * 100
                         log(f"Progress: {progress:.1f}% ({completed_tests}/{total_tests})")
+
+        log("Batch tests completed!")
+        return True
+
+    # ===== special handling for maxsetsupport =====
+    if ACTIVE_TEST_MODE == "maxsetsupport":
+        skipped_rows = []
+        attempt_rows = []
+        for psi_mode in PSI_MODES:
+            for prg_dd, mom_k, mom_t in pair_list:
+                for seed_size_bit in SEED_SIZE_BIT_VALUES:
+                    seed_size = 1 << int(seed_size_bit)
+                    _, baseline_exp = get_maxsetsupport_total_set_size(seed_size, prg_dd)
+                    if baseline_exp is None:
+                        log(
+                            f"Skipping combo with no baseline exponent: n={seed_size}, d={prg_dd}",
+                            "WARNING",
+                        )
+                        continue
+                    if (
+                        MAXSETSUPPORT_SKIP_BASELINE_ABOVE is not None
+                        and int(baseline_exp) > int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)
+                    ):
+                        skipped_row = {
+                            "mode": "maxsetsupport",
+                            "psi_mode": psi_mode,
+                            "seed_size": seed_size,
+                            "seed_size_bit": seed_size_bit,
+                            "prg_dd": prg_dd,
+                            "mom_k": mom_k,
+                            "mom_t": get_valid_mom_t(mom_t),
+                            "baseline_total_set_size_exponent": int(baseline_exp),
+                            "tested_total_set_size_exponent": None,
+                            "total_set_size": None,
+                            "attempt_index": 0,
+                            "status": "skipped_baseline_above_cap",
+                            "reason": (
+                                f"baseline exponent {int(baseline_exp)} exceeds cap "
+                                f"{int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)}"
+                            ),
+                            "max_setexp_cap": int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE),
+                        }
+                        skipped_rows.append(skipped_row)
+                        attempt_rows.append(skipped_row)
+                        log(
+                            f"Skipping combo baseline above cap: n={seed_size}, d={prg_dd}, "
+                            f"baseline=2^{int(baseline_exp)}, cap=2^{int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)}",
+                            "WARNING",
+                        )
+                        continue
+
+                    epsilon = 1.0 / np.sqrt(mom_k)
+                    current_exp = int(baseline_exp)
+                    supported = False
+                    attempt_idx = 0
+
+                    while current_exp >= 1:
+                        total_set_size, total_exp = get_maxsetsupport_total_set_size(
+                            seed_size, prg_dd, exponent_override=current_exp
+                        )
+                        feasible, params = get_maxsetsupport_generation_params(total_set_size)
+                        if not feasible:
+                            reason = params.get("reason", "unknown")
+                            log(
+                                f"Infeasible at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                                f"k={mom_k}, t={mom_t}: {reason}",
+                                "WARNING",
+                            )
+                            skipped_row = {
+                                "mode": "maxsetsupport",
+                                "psi_mode": psi_mode,
+                                "seed_size": seed_size,
+                                "seed_size_bit": seed_size_bit,
+                                "prg_dd": prg_dd,
+                                "mom_k": mom_k,
+                                "mom_t": get_valid_mom_t(mom_t),
+                                "baseline_total_set_size_exponent": int(baseline_exp),
+                                "tested_total_set_size_exponent": int(total_exp),
+                                "total_set_size": total_set_size,
+                                "attempt_index": attempt_idx,
+                                "status": "infeasible",
+                                "reason": reason,
+                                **params,
+                            }
+                            skipped_rows.append(skipped_row)
+                            attempt_rows.append(skipped_row)
+                            current_exp -= 1
+                            attempt_idx += 1
+                            continue
+
+                        test_key = get_test_key(
+                            prg_dd,
+                            mom_k,
+                            mom_t,
+                            seed_size_bit=seed_size_bit,
+                            psi_mode=psi_mode,
+                            total_set_size_exponent=total_exp,
+                        )
+                        if test_key not in results:
+                            results[test_key] = []
+
+                        log(
+                            f"Testing psi_mode={psi_mode}, n={seed_size}, d={prg_dd}, k={mom_k}, "
+                            f"t={mom_t}, set_total=2^{total_exp} "
+                            f"(completed: {len(results[test_key])}/{NUM_RUNS_PER_POINT}, "
+                            f"threshold=1/sqrt(k)={epsilon:.6f})"
+                        )
+
+                        for run in range(len(results[test_key]), NUM_RUNS_PER_POINT):
+                            test_id += 1
+                            completed_tests += 1
+
+                            log(
+                                f"Running test {test_id}/{total_tests}+ "
+                                f"(run {run + 1}/{NUM_RUNS_PER_POINT} at setexp={total_exp})"
+                            )
+
+                            success, test_data_info = generate_test_data(
+                                test_id,
+                                prg_dd,
+                                mom_k,
+                                set_size_override=params["set_size_per_server"],
+                                intersection_size_override=params["intersection_size"],
+                                universal_size_bit_override=params["universal_size_bit"],
+                            )
+                            if not success:
+                                log(f"Failed to generate test data for test {test_id}", "ERROR")
+                                continue
+
+                            test_data_info["total_set_size"] = total_set_size
+                            test_data_info["total_set_size_exponent"] = total_exp
+
+                            success, test_result = run_single_test(
+                                test_id,
+                                prg_dd,
+                                mom_k,
+                                mom_t,
+                                test_data_info,
+                                psi_mode=psi_mode,
+                                seed_size_bit=seed_size_bit,
+                            )
+
+                            if success and test_result:
+                                test_result["total_set_size_exponent"] = total_exp
+                                test_result["baseline_total_set_size_exponent"] = int(baseline_exp)
+                                results[test_key].append(test_result)
+                                save_results(results)
+                                log(
+                                    f"Test {test_id} completed successfully. "
+                                    f"n={seed_size}, d={prg_dd}, k={mom_k}, setexp={total_exp}, "
+                                    f"error ratio: {test_result['error_ratio']:.3f}"
+                                )
+                            else:
+                                log(f"Test {test_id} failed", "ERROR")
+
+                            if os.path.exists(test_data_info['test_data_dir']):
+                                shutil.rmtree(test_data_info['test_data_dir'])
+
+                            progress = (completed_tests / max(1, total_tests)) * 100
+                            log(f"Progress: {progress:.1f}% ({completed_tests}/{total_tests}+)")  # + due to backoff retries
+
+                        median_error = compute_median_abs_error(results[test_key])
+                        status = "missing_data"
+                        if median_error is not None:
+                            status = "supported" if median_error <= epsilon else "not_supported"
+
+                        attempt_row = {
+                            "mode": "maxsetsupport",
+                            "psi_mode": psi_mode,
+                            "seed_size": seed_size,
+                            "seed_size_bit": seed_size_bit,
+                            "prg_dd": prg_dd,
+                            "mom_k": mom_k,
+                            "mom_t": get_valid_mom_t(mom_t),
+                            "kt": mom_k * get_valid_mom_t(mom_t),
+                            "baseline_total_set_size_exponent": int(baseline_exp),
+                            "tested_total_set_size_exponent": int(total_exp),
+                            "total_set_size": total_set_size,
+                            "attempt_index": attempt_idx,
+                            "total_runs": len(results[test_key]),
+                            "median_error": median_error,
+                            "threshold_1_over_sqrt_k": float(epsilon),
+                            "is_supported": bool(status == "supported"),
+                            "status": status,
+                            "test_key": test_key,
+                        }
+                        attempt_rows.append(attempt_row)
+
+                        if status == "supported":
+                            supported = True
+                            log(
+                                f"Supported at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                                f"k={mom_k}, t={mom_t}, median_error={median_error:.6f}, "
+                                f"threshold={epsilon:.6f}"
+                            )
+                            break
+
+                        log(
+                            f"Not supported at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                            f"k={mom_k}, t={mom_t}, median_error={median_error}, "
+                            f"threshold={epsilon:.6f}; reducing exponent by 1",
+                            "WARNING",
+                        )
+                        current_exp -= 1
+                        attempt_idx += 1
+
+                    if not supported:
+                        log(
+                            f"No supported exponent found for n={seed_size}, d={prg_dd}, "
+                            f"k={mom_k}, t={mom_t} (baseline was 2^{baseline_exp})",
+                            "WARNING",
+                        )
+
+        if skipped_rows:
+            skipped_file = f"{RESULTS_DIR}/maxsetsupport_skipped.json"
+            with open(skipped_file, "w") as f:
+                json.dump(skipped_rows, f, indent=2)
+            log(f"maxsetsupport skipped combinations saved to {skipped_file}")
+
+        attempts_file = f"{RESULTS_DIR}/maxsetsupport_attempts.json"
+        with open(attempts_file, "w") as f:
+            json.dump(attempt_rows, f, indent=2)
+        log(f"maxsetsupport attempt history saved to {attempts_file}")
 
         log("Batch tests completed!")
         return True
@@ -887,6 +1154,394 @@ def merge_results_dict(target, incoming):
             target[test_key] = []
         target[test_key].extend(test_results)
 
+def run_maxsetsupport_single_exp_worker(seed_size_bit, total_set_size_exp, psi_mode="naive"):
+    """
+    Worker mode: run exactly one (prg_dd, mom_k, mom_t, seed_size_bit, setexp) combo
+    for NUM_RUNS_PER_POINT runs inside the current run directory.
+    """
+    if ACTIVE_TEST_MODE != "maxsetsupport":
+        log("Single-exp worker only supports maxsetsupport mode", "ERROR")
+        return False
+
+    ensure_directories()
+    save_run_metadata()
+
+    results = load_existing_results()
+    # Ensure each worker has a visible results file from the start.
+    results_file = f"{RESULTS_DIR}/batch_test_results.json"
+    if not os.path.exists(results_file):
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=2)
+        log(f"Initialized worker results file at {results_file}")
+    failure_file = f"{RESULTS_DIR}/maxsetsupport_worker_failures.json"
+    failure_rows = []
+    if os.path.exists(failure_file):
+        try:
+            with open(failure_file, "r") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    failure_rows = loaded
+        except Exception as exc:
+            log(f"Failed to load existing worker failure file: {exc}", "WARNING")
+
+    def save_failures():
+        with open(failure_file, "w") as f:
+            json.dump(failure_rows, f, indent=2)
+
+    required_files = ["./bin/gendata", "./bin/psi_server", "./bin/psi_client"]
+    for file in required_files:
+        if not os.path.exists(file):
+            log(f"Error: {file} not found. Please build the project first.", "ERROR")
+            return False
+
+    if SKIP_KILL_EXISTING:
+        log("Skipping global PSI process cleanup (--skip-kill-existing enabled)")
+    else:
+        kill_existing_processes()
+
+    pair_list = list(iter_filtered_param_pairs())
+    if len(pair_list) != 1:
+        log(
+            f"Single-exp worker requires exactly one filtered pair, got {len(pair_list)}",
+            "ERROR",
+        )
+        return False
+
+    prg_dd, mom_k, mom_t = pair_list[0]
+    seed_size = 1 << int(seed_size_bit)
+    baseline_total_set_size, baseline_exp = get_maxsetsupport_total_set_size(seed_size, prg_dd)
+    if baseline_exp is None:
+        log(f"No baseline exponent for n={seed_size}, d={prg_dd}", "ERROR")
+        return False
+    if (
+        MAXSETSUPPORT_SKIP_BASELINE_ABOVE is not None
+        and int(baseline_exp) > int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)
+    ):
+        log(
+            f"Skipping single-exp worker due to baseline cap: "
+            f"n={seed_size}, d={prg_dd}, baseline=2^{int(baseline_exp)}, "
+            f"cap=2^{int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)}",
+            "WARNING",
+        )
+        return True
+
+    total_set_size, total_exp = get_maxsetsupport_total_set_size(
+        seed_size, prg_dd, exponent_override=int(total_set_size_exp)
+    )
+    feasible, params = get_maxsetsupport_generation_params(total_set_size)
+    if not feasible:
+        log(
+            f"Infeasible worker request for n={seed_size}, d={prg_dd}, set_total=2^{total_exp}: "
+            f"{params.get('reason', 'unknown')}",
+            "ERROR",
+        )
+        return False
+
+    test_key = get_test_key(
+        prg_dd,
+        mom_k,
+        mom_t,
+        seed_size_bit=seed_size_bit,
+        psi_mode=psi_mode,
+        total_set_size_exponent=total_exp,
+    )
+    if test_key not in results:
+        results[test_key] = []
+        # Persist empty combo entry so worker progress is visible even before first success.
+        save_results(results)
+
+    existing_runs = len(results[test_key])
+    log(
+        f"[single-exp-worker] combo: psi_mode={psi_mode}, n={seed_size}, d={prg_dd}, "
+        f"k={mom_k}, t={mom_t}, set_total=2^{total_exp}, "
+        f"completed={existing_runs}/{NUM_RUNS_PER_POINT}"
+    )
+
+    test_id = 0
+    for run in range(existing_runs, NUM_RUNS_PER_POINT):
+        test_id += 1
+        log(
+            f"[single-exp-worker] run {run + 1}/{NUM_RUNS_PER_POINT} "
+            f"(local test_id={test_id})"
+        )
+
+        success, test_data_info = generate_test_data(
+            test_id,
+            prg_dd,
+            mom_k,
+            set_size_override=params["set_size_per_server"],
+            intersection_size_override=params["intersection_size"],
+            universal_size_bit_override=params["universal_size_bit"],
+        )
+        if not success:
+            log(f"Failed to generate test data for worker test {test_id}", "ERROR")
+            failure_rows.append({
+                "mode": "maxsetsupport",
+                "stage": "generate_test_data",
+                "status": "failed",
+                "error_reason": "generate_test_data_failed",
+                "test_id": test_id,
+                "run_index": run + 1,
+                "target_num_runs": NUM_RUNS_PER_POINT,
+                "psi_mode": psi_mode,
+                "seed_size_bit": seed_size_bit,
+                "seed_size": seed_size,
+                "prg_dd": prg_dd,
+                "mom_k": mom_k,
+                "mom_t": get_valid_mom_t(mom_t),
+                "baseline_total_set_size_exponent": int(baseline_exp),
+                "tested_total_set_size_exponent": int(total_exp),
+                "timestamp": datetime.now().isoformat(),
+            })
+            save_failures()
+            continue
+
+        test_data_info["total_set_size"] = total_set_size
+        test_data_info["total_set_size_exponent"] = total_exp
+
+        success, test_result, error_reason = run_single_test(
+            test_id,
+            prg_dd,
+            mom_k,
+            mom_t,
+            test_data_info,
+            psi_mode=psi_mode,
+            seed_size_bit=seed_size_bit,
+            return_error=True,
+        )
+        if success and test_result:
+            test_result["total_set_size_exponent"] = total_exp
+            test_result["baseline_total_set_size_exponent"] = int(baseline_exp)
+            results[test_key].append(test_result)
+            save_results(results)
+        else:
+            log(f"Worker test {test_id} failed", "ERROR")
+            failure_rows.append({
+                "mode": "maxsetsupport",
+                "stage": "run_single_test",
+                "status": "failed",
+                "error_reason": error_reason or "unknown",
+                "test_id": test_id,
+                "run_index": run + 1,
+                "target_num_runs": NUM_RUNS_PER_POINT,
+                "psi_mode": psi_mode,
+                "seed_size_bit": seed_size_bit,
+                "seed_size": seed_size,
+                "prg_dd": prg_dd,
+                "mom_k": mom_k,
+                "mom_t": get_valid_mom_t(mom_t),
+                "baseline_total_set_size_exponent": int(baseline_exp),
+                "tested_total_set_size_exponent": int(total_exp),
+                "test_data_dir": test_data_info.get("test_data_dir"),
+                "timestamp": datetime.now().isoformat(),
+            })
+            save_failures()
+
+        if os.path.exists(test_data_info["test_data_dir"]):
+            shutil.rmtree(test_data_info["test_data_dir"])
+
+    if failure_rows:
+        log(
+            f"[single-exp-worker] failure diagnostics saved to {failure_file} "
+            f"(rows={len(failure_rows)})"
+        )
+    log("[single-exp-worker] completed")
+    return True
+
+def estimate_maxsetsupport_peak_temp_bytes(parallel_workers):
+    """
+    Estimate peak temporary data footprint during maxsetsupport parallel runs.
+    This estimates concurrently active test_data directories only.
+    """
+    if ACTIVE_TEST_MODE != "maxsetsupport":
+        return 0, 0
+
+    pair_list = list(iter_filtered_param_pairs())
+    if not pair_list:
+        return 0, 0
+
+    active_workers = max(1, min(int(parallel_workers), len(pair_list)))
+    bytes_per_value = len(str((1 << MAX_GENDATA_UNIVERSAL_SIZE_BIT) - 1)) + 1  # text int + '\n'
+
+    worst_values_per_worker = 0
+    for prg_dd, _, _ in pair_list:
+        max_values_this_pair = 0
+        for seed_size_bit in SEED_SIZE_BIT_VALUES:
+            seed_size = 1 << int(seed_size_bit)
+            _, baseline_exp = get_maxsetsupport_total_set_size(seed_size, prg_dd)
+            if baseline_exp is None or baseline_exp < 1:
+                continue
+            set_size_per_server = 1 << (int(baseline_exp) - 1)
+            values = 2 * NUM_CLIENTS_PER_SERVER * set_size_per_server
+            if values > max_values_this_pair:
+                max_values_this_pair = values
+        if max_values_this_pair > worst_values_per_worker:
+            worst_values_per_worker = max_values_this_pair
+
+    peak_temp_bytes = active_workers * worst_values_per_worker * bytes_per_value
+    return peak_temp_bytes, active_workers
+
+def run_seed_optimization_parallel_pipeline(parallel_workers, worker_num_runs=34):
+    """
+    For each (prg_dd, mom_k, mom_t), launch N worker runs in parallel.
+    Each worker runs this script in seed_optimization mode with worker_num_runs.
+    Then merge worker result files, analyze, and draw figure.
+    """
+    if ACTIVE_TEST_MODE != "seed_optimization":
+        log("Parallel orchestrator only supports seed_optimization mode", "ERROR")
+        return False
+
+    ensure_directories()
+    save_run_metadata()
+
+    pair_list = list(iter_filtered_param_pairs())
+    if not pair_list:
+        log("No parameter pairs matched current filters", "ERROR")
+        return False
+
+    script_path = os.path.abspath(__file__)
+    aggregate_results = {}
+    pair_summaries = []
+    run_failures = 0
+
+    for pair_idx, (prg_dd, mom_k, mom_t) in enumerate(pair_list):
+        pair_label = f"prg_dd_{prg_dd}_mom_k_{mom_k}_mom_t_{mom_t}"
+        pair_root = os.path.join(BASE_RUN_DIR, "workers", pair_label)
+        os.makedirs(pair_root, exist_ok=True)
+
+        log(
+            f"Launching {parallel_workers} workers for {pair_label}; "
+            f"each worker uses num-runs={worker_num_runs}"
+        )
+
+        def worker_task(worker_idx):
+            worker_run_dir = os.path.join(pair_root, f"worker_{worker_idx:02d}")
+            worker_port_base = PORT_BASE + pair_idx * parallel_workers * 1000 + worker_idx * 1000
+            started_at = datetime.now().isoformat()
+            log(
+                f"[{pair_label}] Worker {worker_idx:02d} started at {started_at} "
+                f"(port_base={worker_port_base})"
+            )
+            cmd = [
+                sys.executable,
+                script_path,
+                "--run-tests",
+                "--param-mode", "seed_optimization",
+                "--num-runs", str(worker_num_runs),
+                "--run-dir", worker_run_dir,
+                "--only-prg-dd", str(prg_dd),
+                "--only-mom-k", str(mom_k),
+                "--only-mom-t", str(mom_t),
+                "--port-base", str(worker_port_base),
+            ]
+            if VERBOSE:
+                cmd.append("--verbose")
+
+            t0 = time.time()
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            finished_at = datetime.now().isoformat()
+            elapsed_sec = time.time() - t0
+            log(
+                f"[{pair_label}] Worker {worker_idx:02d} finished at {finished_at} "
+                f"(elapsed={elapsed_sec:.2f}s, returncode={proc.returncode})"
+            )
+            worker_result_file = os.path.join(worker_run_dir, "results", "batch_test_results.json")
+            return {
+                "worker_idx": worker_idx,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_sec": elapsed_sec,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "result_file": worker_result_file,
+            }
+
+        worker_reports = []
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            futures = [executor.submit(worker_task, i + 1) for i in range(parallel_workers)]
+            for future in futures:
+                worker_reports.append(future.result())
+
+        merged_workers = 0
+        for report in worker_reports:
+            if report["returncode"] != 0:
+                run_failures += 1
+                log(
+                    f"Worker {report['worker_idx']} failed for {pair_label} "
+                    f"(return code {report['returncode']})",
+                    "WARNING"
+                )
+                if VERBOSE:
+                    if report["stdout"]:
+                        log(report["stdout"], "WARNING")
+                    if report["stderr"]:
+                        log(report["stderr"], "WARNING")
+                continue
+
+            if not os.path.exists(report["result_file"]):
+                run_failures += 1
+                log(
+                    f"Worker {report['worker_idx']} missing results file for {pair_label}: "
+                    f"{report['result_file']}",
+                    "WARNING"
+                )
+                continue
+
+            with open(report["result_file"], "r") as f:
+                worker_results = json.load(f)
+            merge_results_dict(aggregate_results, worker_results)
+            merged_workers += 1
+
+        pair_summaries.append({
+            "pair_label": pair_label,
+            "prg_dd": prg_dd,
+            "mom_k": mom_k,
+            "mom_t": mom_t,
+            "workers_requested": parallel_workers,
+            "workers_merged": merged_workers,
+            "worker_reports": [
+                {
+                    "worker_idx": report["worker_idx"],
+                    "started_at": report["started_at"],
+                    "finished_at": report["finished_at"],
+                    "elapsed_sec": report["elapsed_sec"],
+                    "returncode": report["returncode"],
+                }
+                for report in sorted(worker_reports, key=lambda x: x["worker_idx"])
+            ],
+        })
+
+        log(f"Merged {merged_workers}/{parallel_workers} worker result files for {pair_label}")
+
+    save_results(aggregate_results)
+
+    orchestrator_file = f"{RESULTS_DIR}/seed_optimization_parallel_orchestrator_summary.json"
+    with open(orchestrator_file, "w") as f:
+        json.dump(
+            {
+                "mode": ACTIVE_TEST_MODE,
+                "parallel_workers": parallel_workers,
+                "worker_num_runs": worker_num_runs,
+                "run_failures": run_failures,
+                "pair_summaries": pair_summaries,
+            },
+            f,
+            indent=2
+        )
+    log(f"Parallel orchestrator summary saved to {orchestrator_file}")
+
+    analysis_results = analyze_results()
+    if not analysis_results:
+        log("Analysis failed after merging worker outputs", "ERROR")
+        return False
+
+    if not create_plots(analysis_results):
+        log("Plot generation failed after merged analysis", "ERROR")
+        return False
+
+    return True
+
 def run_errorvsepsilon_parallel_pipeline(parallel_workers, worker_num_runs=34):
     """
     For each (prg_dd, mom_k, mom_t), launch N worker runs in parallel.
@@ -937,9 +1592,11 @@ def run_errorvsepsilon_parallel_pipeline(parallel_workers, worker_num_runs=34):
                 "--run-dir", worker_run_dir,
                 "--only-prg-dd", str(prg_dd),
                 "--only-mom-k", str(mom_k),
-                "--only-mom-t", str(mom_t),
                 "--port-base", str(worker_port_base),
+                "--skip-kill-existing",
             ]
+            if mom_t is not None:
+                cmd.extend(["--only-mom-t", str(mom_t)])
             if VERBOSE:
                 cmd.append("--verbose")
 
@@ -1048,6 +1705,410 @@ def run_errorvsepsilon_parallel_pipeline(parallel_workers, worker_num_runs=34):
 
     return True
 
+def run_maxsetsupport_parallel_pipeline(parallel_workers):
+    """
+    Sequentially process each (prg_dd, seed_size_bit) combo.
+    For the active combo, launch parallel workers to fill missing runs for one
+    tested exponent; repeat until NUM_RUNS_PER_POINT is reached, then decide
+    support/backoff and continue.
+    """
+    if ACTIVE_TEST_MODE != "maxsetsupport":
+        log("Parallel orchestrator only supports maxsetsupport mode", "ERROR")
+        return False
+
+    ensure_directories()
+    save_run_metadata()
+
+    pair_list = list(iter_filtered_param_pairs())
+    if not pair_list:
+        log("No parameter pairs matched current filters", "ERROR")
+        return False
+
+    if parallel_workers <= 0:
+        log("parallel_workers must be > 0", "ERROR")
+        return False
+
+    script_path = os.path.abspath(__file__)
+    aggregate_results = load_existing_results()
+    all_attempt_rows = []
+    all_skipped_rows = []
+    run_failures = 0
+
+    peak_temp_bytes, active_workers = estimate_maxsetsupport_peak_temp_bytes(parallel_workers)
+    log(
+        f"[maxsetsupport-parallel] estimated peak temp data footprint: "
+        f"{peak_temp_bytes / (1024 ** 3):.2f} GiB (active_workers={active_workers})"
+    )
+
+    def worker_task(worker_idx, worker_run_dir, prg_dd, mom_k, mom_t, seed_size_bit, total_exp, worker_runs, worker_port_base, psi_mode):
+        started_at = datetime.now().isoformat()
+        pair_label = (
+            f"prg_dd_{prg_dd}_mom_k_{mom_k}_mom_t_{mom_t}"
+            f"_seedbit_{seed_size_bit}_setexp_{total_exp}"
+        )
+        log(f"[maxsetsupport] worker {pair_label}#{worker_idx:02d} started at {started_at} (port_base={worker_port_base}, runs={worker_runs})")
+
+        cmd = [
+            sys.executable,
+            script_path,
+            "--run-tests",
+            "--param-mode", "maxsetsupport",
+            "--num-runs", str(worker_runs),
+            "--run-dir", worker_run_dir,
+            "--only-prg-dd", str(prg_dd),
+            "--only-mom-k", str(mom_k),
+            "--port-base", str(worker_port_base),
+            "--skip-kill-existing",
+            "--maxsetsupport-worker-single",
+            "--worker-seed-size-bit", str(seed_size_bit),
+            "--worker-total-set-exp", str(total_exp),
+            "--worker-psi-mode", str(psi_mode),
+        ]
+        if mom_t is not None:
+            cmd.extend(["--only-mom-t", str(mom_t)])
+        if VERBOSE:
+            cmd.append("--verbose")
+
+        t0 = time.time()
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        finished_at = datetime.now().isoformat()
+        elapsed_sec = time.time() - t0
+
+        log(f"[maxsetsupport] worker {pair_label}#{worker_idx:02d} finished at {finished_at} (elapsed={elapsed_sec:.2f}s, returncode={proc.returncode})")
+        result_dir = os.path.join(worker_run_dir, "results")
+        return {
+            "worker_idx": worker_idx,
+            "pair_label": pair_label,
+            "prg_dd": prg_dd,
+            "mom_k": mom_k,
+            "mom_t": mom_t,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "elapsed_sec": elapsed_sec,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "result_file": os.path.join(result_dir, "batch_test_results.json"),
+            "attempt_file": os.path.join(result_dir, "maxsetsupport_attempts.json"),
+            "skipped_file": os.path.join(result_dir, "maxsetsupport_skipped.json"),
+        }
+    worker_reports_all = []
+    combos_processed = 0
+    successful_combos = 0
+
+    for psi_mode in PSI_MODES:
+        for pair_idx, (prg_dd, mom_k, mom_t) in enumerate(pair_list, start=1):
+            for seed_size_bit in SEED_SIZE_BIT_VALUES:
+                seed_size = 1 << int(seed_size_bit)
+                _, baseline_exp = get_maxsetsupport_total_set_size(seed_size, prg_dd)
+                combos_processed += 1
+
+                if baseline_exp is None:
+                    log(
+                        f"Skipping combo with no baseline exponent: n={seed_size}, d={prg_dd}",
+                        "WARNING",
+                    )
+                    continue
+                if (
+                    MAXSETSUPPORT_SKIP_BASELINE_ABOVE is not None
+                    and int(baseline_exp) > int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)
+                ):
+                    row = {
+                        "mode": "maxsetsupport",
+                        "psi_mode": psi_mode,
+                        "seed_size": seed_size,
+                        "seed_size_bit": seed_size_bit,
+                        "prg_dd": prg_dd,
+                        "mom_k": mom_k,
+                        "mom_t": get_valid_mom_t(mom_t),
+                        "baseline_total_set_size_exponent": int(baseline_exp),
+                        "tested_total_set_size_exponent": None,
+                        "total_set_size": None,
+                        "attempt_index": 0,
+                        "status": "skipped_baseline_above_cap",
+                        "reason": (
+                            f"baseline exponent {int(baseline_exp)} exceeds cap "
+                            f"{int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)}"
+                        ),
+                        "max_setexp_cap": int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE),
+                    }
+                    all_skipped_rows.append(row)
+                    all_attempt_rows.append(row)
+                    log(
+                        f"Skipping combo baseline above cap: n={seed_size}, d={prg_dd}, "
+                        f"baseline=2^{int(baseline_exp)}, cap=2^{int(MAXSETSUPPORT_SKIP_BASELINE_ABOVE)}",
+                        "WARNING",
+                    )
+                    continue
+
+                epsilon = 1.0 / np.sqrt(mom_k)
+                current_exp = int(baseline_exp)
+                attempt_idx = 0
+                supported = False
+
+                while current_exp >= 1:
+                    total_set_size, total_exp = get_maxsetsupport_total_set_size(
+                        seed_size, prg_dd, exponent_override=current_exp
+                    )
+                    feasible, params = get_maxsetsupport_generation_params(total_set_size)
+                    if not feasible:
+                        reason = params.get("reason", "unknown")
+                        row = {
+                            "mode": "maxsetsupport",
+                            "psi_mode": psi_mode,
+                            "seed_size": seed_size,
+                            "seed_size_bit": seed_size_bit,
+                            "prg_dd": prg_dd,
+                            "mom_k": mom_k,
+                            "mom_t": get_valid_mom_t(mom_t),
+                            "baseline_total_set_size_exponent": int(baseline_exp),
+                            "tested_total_set_size_exponent": int(total_exp),
+                            "total_set_size": total_set_size,
+                            "attempt_index": attempt_idx,
+                            "status": "infeasible",
+                            "reason": reason,
+                            **params,
+                        }
+                        all_skipped_rows.append(row)
+                        all_attempt_rows.append(row)
+                        log(
+                            f"Infeasible at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                            f"k={mom_k}, t={mom_t}: {reason}",
+                            "WARNING",
+                        )
+                        current_exp -= 1
+                        attempt_idx += 1
+                        continue
+
+                    test_key = get_test_key(
+                        prg_dd,
+                        mom_k,
+                        mom_t,
+                        seed_size_bit=seed_size_bit,
+                        psi_mode=psi_mode,
+                        total_set_size_exponent=total_exp,
+                    )
+                    if test_key not in aggregate_results:
+                        aggregate_results[test_key] = []
+
+                    previous_completed = -1
+                    while len(aggregate_results[test_key]) < NUM_RUNS_PER_POINT:
+                        remaining = NUM_RUNS_PER_POINT - len(aggregate_results[test_key])
+                        workers_this_round = max(1, min(int(parallel_workers), remaining))
+                        base_quota = remaining // workers_this_round
+                        extra = remaining % workers_this_round
+                        quotas = [base_quota + (1 if idx < extra else 0) for idx in range(workers_this_round)]
+                        quotas = [q for q in quotas if q > 0]
+                        workers_this_round = len(quotas)
+                        if workers_this_round == 0:
+                            break
+
+                        combo_label = (
+                            f"prg_dd_{prg_dd}_mom_k_{mom_k}_mom_t_{mom_t}"
+                            f"_seedbit_{seed_size_bit}_setexp_{total_exp}"
+                        )
+                        combo_root = os.path.join(BASE_RUN_DIR, "workers", "maxsetsupport_combo", combo_label)
+                        os.makedirs(combo_root, exist_ok=True)
+                        round_id = len(aggregate_results[test_key]) + 1
+                        log(
+                            f"[maxsetsupport] combo {combo_label}: launching {workers_this_round} workers "
+                            f"(remaining={remaining}, target={NUM_RUNS_PER_POINT}, round_id={round_id})"
+                        )
+
+                        worker_reports = []
+                        with ThreadPoolExecutor(max_workers=workers_this_round) as executor:
+                            futures = []
+                            for widx, worker_runs in enumerate(quotas, start=1):
+                                worker_run_dir = os.path.join(combo_root, f"round_{round_id:04d}", f"worker_{widx:02d}")
+                                os.makedirs(worker_run_dir, exist_ok=True)
+                                # IMPORTANT:
+                                # run_single_test uses ports in [port_base, port_base+999] (test_id % 1000).
+                                # So concurrent workers must be spaced by at least 1000 to avoid overlap.
+                                # Also keep ports in valid TCP range (< 65536).
+                                worker_port_base = PORT_BASE + (widx - 1) * 1000
+                                if worker_port_base > 64000:
+                                    log(
+                                        f"Computed worker port_base={worker_port_base} exceeds safe range; "
+                                        f"reduce parallel workers or lower --port-base",
+                                        "ERROR",
+                                    )
+                                    run_failures += 1
+                                    continue
+                                futures.append(
+                                    executor.submit(
+                                        worker_task,
+                                        widx,
+                                        worker_run_dir,
+                                        prg_dd,
+                                        mom_k,
+                                        mom_t,
+                                        seed_size_bit,
+                                        total_exp,
+                                        worker_runs,
+                                        worker_port_base,
+                                        psi_mode,
+                                    )
+                                )
+                            for future in futures:
+                                worker_reports.append(future.result())
+
+                        for report in sorted(worker_reports, key=lambda x: x["worker_idx"]):
+                            worker_reports_all.append(report)
+                            if report["returncode"] != 0:
+                                run_failures += 1
+                                log(
+                                    f"Worker failed for {report['pair_label']} "
+                                    f"(return code {report['returncode']})",
+                                    "WARNING",
+                                )
+                                if VERBOSE:
+                                    if report["stdout"]:
+                                        log(report["stdout"], "WARNING")
+                                    if report["stderr"]:
+                                        log(report["stderr"], "WARNING")
+                                continue
+
+                            if not os.path.exists(report["result_file"]):
+                                run_failures += 1
+                                log(
+                                    f"Missing results file for {report['pair_label']}: {report['result_file']}",
+                                    "WARNING",
+                                )
+                                continue
+
+                            with open(report["result_file"], "r") as f:
+                                worker_results = json.load(f)
+                            merge_results_dict(aggregate_results, worker_results)
+
+                        # Keep this combo capped to exactly NUM_RUNS_PER_POINT after merge.
+                        if len(aggregate_results[test_key]) > NUM_RUNS_PER_POINT:
+                            aggregate_results[test_key] = aggregate_results[test_key][:NUM_RUNS_PER_POINT]
+
+                        save_results(aggregate_results)
+                        now_completed = len(aggregate_results[test_key])
+                        log(
+                            f"[maxsetsupport] combo progress n={seed_size}, d={prg_dd}, setexp={total_exp}: "
+                            f"{now_completed}/{NUM_RUNS_PER_POINT}"
+                        )
+
+                        if now_completed <= previous_completed:
+                            log(
+                                f"No progress for combo n={seed_size}, d={prg_dd}, setexp={total_exp}; "
+                                "aborting this exponent attempt",
+                                "WARNING",
+                            )
+                            break
+                        previous_completed = now_completed
+
+                    median_error = compute_median_abs_error(aggregate_results[test_key])
+                    status = "missing_data"
+                    if median_error is not None:
+                        status = "supported" if median_error <= epsilon else "not_supported"
+
+                    attempt_row = {
+                        "mode": "maxsetsupport",
+                        "psi_mode": psi_mode,
+                        "seed_size": seed_size,
+                        "seed_size_bit": seed_size_bit,
+                        "prg_dd": prg_dd,
+                        "mom_k": mom_k,
+                        "mom_t": get_valid_mom_t(mom_t),
+                        "kt": mom_k * get_valid_mom_t(mom_t),
+                        "baseline_total_set_size_exponent": int(baseline_exp),
+                        "tested_total_set_size_exponent": int(total_exp),
+                        "total_set_size": total_set_size,
+                        "attempt_index": attempt_idx,
+                        "total_runs": len(aggregate_results[test_key]),
+                        "median_error": median_error,
+                        "threshold_1_over_sqrt_k": float(epsilon),
+                        "is_supported": bool(status == "supported"),
+                        "status": status,
+                        "test_key": test_key,
+                    }
+                    all_attempt_rows.append(attempt_row)
+
+                    if status == "supported":
+                        supported = True
+                        successful_combos += 1
+                        log(
+                            f"Supported at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                            f"k={mom_k}, t={mom_t}, median_error={median_error:.6f}, "
+                            f"threshold={epsilon:.6f}"
+                        )
+                        break
+
+                    log(
+                        f"Not supported at set_total=2^{total_exp} for n={seed_size}, d={prg_dd}, "
+                        f"k={mom_k}, t={mom_t}, median_error={median_error}, "
+                        f"threshold={epsilon:.6f}; reducing exponent by 1",
+                        "WARNING",
+                    )
+                    current_exp -= 1
+                    attempt_idx += 1
+
+                if not supported:
+                    log(
+                        f"No supported exponent found for n={seed_size}, d={prg_dd}, "
+                        f"k={mom_k}, t={mom_t} (baseline was 2^{baseline_exp})",
+                        "WARNING",
+                    )
+
+    if all_attempt_rows:
+        attempts_file = f"{RESULTS_DIR}/maxsetsupport_attempts.json"
+        with open(attempts_file, "w") as f:
+            json.dump(all_attempt_rows, f, indent=2)
+        log(f"Merged maxsetsupport attempts saved to {attempts_file}")
+
+    if all_skipped_rows:
+        skipped_file = f"{RESULTS_DIR}/maxsetsupport_skipped.json"
+        with open(skipped_file, "w") as f:
+            json.dump(all_skipped_rows, f, indent=2)
+        log(f"Merged maxsetsupport skipped rows saved to {skipped_file}")
+
+    orchestrator_file = f"{RESULTS_DIR}/parallel_orchestrator_summary.json"
+    with open(orchestrator_file, "w") as f:
+        json.dump(
+            {
+                "mode": ACTIVE_TEST_MODE,
+                "parallel_workers_requested": parallel_workers,
+                "parallel_workers_active": min(parallel_workers, active_workers),
+                "run_failures": run_failures,
+                "estimated_peak_temp_bytes": peak_temp_bytes,
+                "combos_processed": combos_processed,
+                "combos_supported": successful_combos,
+                "worker_reports": [
+                    {
+                        "worker_idx": r["worker_idx"],
+                        "pair_label": r["pair_label"],
+                        "prg_dd": r["prg_dd"],
+                        "mom_k": r["mom_k"],
+                        "mom_t": r["mom_t"],
+                        "started_at": r["started_at"],
+                        "finished_at": r["finished_at"],
+                        "elapsed_sec": r["elapsed_sec"],
+                        "returncode": r["returncode"],
+                    }
+                    for r in sorted(worker_reports_all, key=lambda x: (x["pair_label"], x["worker_idx"]))
+                ],
+                "workers_merged": len([r for r in worker_reports_all if r["returncode"] == 0]),
+            },
+            f,
+            indent=2
+        )
+    log(f"Parallel orchestrator summary saved to {orchestrator_file}")
+
+    analysis_results = analyze_results()
+    if not analysis_results:
+        log("Analysis failed after merging worker outputs", "ERROR")
+        return False
+
+    success = summarize_maxsetsupport(analysis_results)
+    if not success:
+        log("maxsetsupport summary export failed after merge", "ERROR")
+        return False
+
+    return True
+
 def recommend_parallel_workers_for_cores(target_cores=None):
     """Estimate worker count so concurrent PSI processes roughly match CPU cores."""
     detected_cores = os.cpu_count() or 1
@@ -1149,6 +2210,9 @@ def analyze_results():
             'filtered_runs': len(filtered_ratios),
             'seed_size_bit': sample_result.get('seed_size_bit'),
             'seed_size': sample_result.get('seed_size'),
+            'total_set_size': sample_result.get('total_set_size'),
+            'total_set_size_exponent': sample_result.get('total_set_size_exponent'),
+            'set_size_per_server': sample_result.get('set_size_per_server'),
         }
     
     # Save analysis results
@@ -1159,153 +2223,182 @@ def analyze_results():
     log(f"Analysis results saved to {analysis_file}")
     return analysis_results
 
-def export_kttune_summary(analysis_results):
-    """Export kttune summary: for each sketch size (kt), record t and mean error."""
-    if not analysis_results:
+def summarize_maxsetsupport(analysis_results):
+    """Summarize max supported set-size exponent and full reduction history."""
+    def safe_int(value, default=None):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    attempt_file = f"{RESULTS_DIR}/maxsetsupport_attempts.json"
+    attempt_rows = []
+
+    if os.path.exists(attempt_file):
+        try:
+            with open(attempt_file, "r") as f:
+                attempt_rows = json.load(f)
+        except Exception as exc:
+            log(f"Failed to load maxsetsupport attempt file: {exc}", "WARNING")
+
+    # Fallback for legacy runs without attempt history.
+    if not attempt_rows and analysis_results:
+        for row in analysis_results.values():
+            if row.get("mode") != "maxsetsupport":
+                continue
+            mom_k = int(row.get("mom_k"))
+            epsilon = float(1.0 / np.sqrt(mom_k))
+            median_error = float(row.get("median_error"))
+            attempt_rows.append({
+                "mode": "maxsetsupport",
+                "psi_mode": row.get("psi_mode", "naive"),
+                "seed_size": int(row.get("seed_size")),
+                "seed_size_bit": row.get("seed_size_bit"),
+                "prg_dd": int(row.get("prg_dd")),
+                "mom_k": mom_k,
+                "mom_t": int(row.get("mom_t", get_valid_mom_t(None))),
+                "kt": int(row.get("kt", mom_k * int(row.get("mom_t", get_valid_mom_t(None))))),
+                "baseline_total_set_size_exponent": row.get("total_set_size_exponent"),
+                "tested_total_set_size_exponent": row.get("total_set_size_exponent"),
+                "total_set_size": row.get("total_set_size"),
+                "attempt_index": 0,
+                "total_runs": int(row.get("total_runs", 0)),
+                "median_error": median_error,
+                "threshold_1_over_sqrt_k": epsilon,
+                "is_supported": bool(median_error <= epsilon),
+                "status": ("supported" if median_error <= epsilon else "not_supported"),
+            })
+
+    if not attempt_rows:
+        log("No maxsetsupport attempt data found", "ERROR")
         return False
 
     grouped = {}
-    for result in analysis_results.values():
-        if result.get('mode', DEFAULT_TEST_MODE) != "kttune":
+    for row in attempt_rows:
+        try:
+            key = (
+                int(row.get("seed_size")),
+                int(row.get("prg_dd")),
+                int(row.get("mom_k")),
+                int(row.get("mom_t", get_valid_mom_t(None))),
+                row.get("psi_mode", "naive"),
+            )
+        except Exception:
             continue
+        grouped.setdefault(key, []).append(row)
 
-        kt = int(result.get('kt', result['mom_k'] * result.get('mom_t', MOM_T)))
-        mom_t = int(result.get('mom_t', MOM_T))
-        key = (kt, mom_t)
-        grouped.setdefault(key, []).append(float(result['mean_error']))
+    combo_rows = []
+    for key, rows in grouped.items():
+        seed_size, prg_dd, mom_k, mom_t, psi_mode = key
+        rows_sorted = sorted(
+            rows,
+            key=lambda r: safe_int(r.get("tested_total_set_size_exponent"), -1),
+            reverse=True,
+        )
 
-    if not grouped:
-        log("No kttune data found to export", "WARNING")
-        return False
+        baseline_exp = rows_sorted[0].get("baseline_total_set_size_exponent")
+        if baseline_exp is None:
+            baseline_exp = rows_sorted[0].get("tested_total_set_size_exponent")
+        baseline_exp = safe_int(baseline_exp, -1)
 
-    rows = []
-    for (kt, mom_t), mean_errors in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
-        rows.append({
-            "kt": kt,
-            "plain_sketct_size": (kt * 8) / 1024.0,
+        supported_rows = [r for r in rows_sorted if bool(r.get("is_supported"))]
+        best_supported_exp = None
+        best_supported_median = None
+        final_status = "not_supported"
+
+        if supported_rows:
+            best_row = max(supported_rows, key=lambda r: safe_int(r.get("tested_total_set_size_exponent"), -1))
+            best_supported_exp = safe_int(best_row.get("tested_total_set_size_exponent"), -1)
+            best_supported_median = best_row.get("median_error")
+            final_status = "supported"
+        elif any(r.get("status") == "skipped_baseline_above_cap" for r in rows_sorted):
+            final_status = "skipped_baseline_above_cap"
+        elif any(r.get("status") == "infeasible" for r in rows_sorted):
+            final_status = "infeasible"
+
+        if best_supported_exp is not None and best_supported_exp >= 1:
+            reductions = baseline_exp - best_supported_exp
+            max_supported_total_set_size = int(1 << best_supported_exp)
+        else:
+            reductions = None
+            max_supported_total_set_size = None
+            best_supported_exp = None
+
+        combo_rows.append({
+            "seed_size": seed_size,
+            "seed_size_bit": int(np.log2(seed_size)),
+            "prg_dd": prg_dd,
+            "mom_k": mom_k,
             "mom_t": mom_t,
-            "mean_error": float(np.mean(mean_errors)),
-            "num_points": len(mean_errors),
+            "kt": mom_k * mom_t,
+            "psi_mode": psi_mode,
+            "baseline_total_set_size_exponent": baseline_exp,
+            "max_supported_total_set_size_exponent": best_supported_exp,
+            "max_supported_total_set_size": max_supported_total_set_size,
+            "reductions_from_baseline": reductions,
+            "best_supported_median_error": best_supported_median,
+            "threshold_1_over_sqrt_k": float(1.0 / np.sqrt(mom_k)),
+            "num_attempts": len(rows_sorted),
+            "final_status": final_status,
         })
 
-    summary_file = f"{RESULTS_DIR}/kttune_sketch_t_mean_error.json"
-    with open(summary_file, "w") as f:
-        json.dump(rows, f, indent=2)
+    summary_json = {
+        "mode": "maxsetsupport",
+        "rule": "start from baseline exponent; reduce by 1 until median actual_error <= 1/sqrt(k)",
+        "baseline_set_size_exponents": MAXSETSUPPORT_SET_SIZE_EXPONENTS,
+        "attempt_rows": attempt_rows,
+        "combo_rows": combo_rows,
+    }
 
-    log(f"kttune summary saved to {summary_file}")
+    summary_json_file = f"{RESULTS_DIR}/maxsetsupport_summary.json"
+    with open(summary_json_file, "w") as f:
+        json.dump(summary_json, f, indent=2)
+
+    attempts_csv_file = f"{RESULTS_DIR}/maxsetsupport_attempts.csv"
+    pd.DataFrame(attempt_rows).to_csv(attempts_csv_file, index=False)
+    combo_csv_file = f"{RESULTS_DIR}/maxsetsupport_summary.csv"
+    pd.DataFrame(combo_rows).to_csv(combo_csv_file, index=False)
+
+    log(f"maxsetsupport summary saved to {summary_json_file}")
+    log(f"maxsetsupport attempts CSV saved to {attempts_csv_file}")
+    log(f"maxsetsupport combo summary CSV saved to {combo_csv_file}")
+
+    print("\nmaxsetsupport summary (max supported exponent):")
+    for row in sorted(combo_rows, key=lambda r: (r["seed_size"], r["prg_dd"], r["mom_k"], r["mom_t"])):
+        max_exp = row["max_supported_total_set_size_exponent"]
+        max_exp_str = f"2^{max_exp}" if max_exp is not None else "N/A"
+        print(
+            f"n={row['seed_size']}, d={row['prg_dd']}, k={row['mom_k']}, t={row['mom_t']}, "
+            f"baseline=2^{row['baseline_total_set_size_exponent']}, max_supported={max_exp_str}, "
+            f"reductions={row['reductions_from_baseline']}, status={row['final_status']}"
+        )
+
     return True
 
 # ==================== PLOTTING ====================
 
+PLOT_WIDTH = 8 * 1.2
+PLOT_HEIGHT = 4.944271909999159 * 1.2
+PLOT_MARKER_SIZE = 11
+
+
+def init_plotting(fig_width=8 * 1.2, fig_height=4.944271909999159 * 1.2, font=20):
+    """Apply shared plotting style for figure ratio and text sizing."""
+    plt.rcParams['figure.figsize'] = [fig_width, fig_height]
+    plt.rcParams['font.size'] = font
+    plt.rcParams['font.family'] = 'serif'
+    plt.rcParams['font.serif'] = ['Times New Roman', 'Times', 'TeX Gyre Termes', 'Liberation Serif', 'DejaVu Serif']
+    plt.rcParams['axes.labelsize'] = plt.rcParams['font.size']
+    plt.rcParams['axes.titlesize'] = 1.5 * plt.rcParams['font.size']
+    plt.rcParams['legend.fontsize'] = plt.rcParams['font.size']
+    plt.rcParams['xtick.labelsize'] = plt.rcParams['font.size']
+    plt.rcParams['ytick.labelsize'] = plt.rcParams['font.size']
+    plt.rcParams['legend.frameon'] = False
+    plt.rcParams['legend.loc'] = 'upper center'
+    plt.rcParams['axes.linewidth'] = 1
 
 
 
-def create_errorvsepsilon_boxplot_from_csv():
-    """Create error-vs-epsilon plot from existing summary CSV without rewriting it."""
-    if plt is None:
-        return False
-
-    summary_file = f"{RESULTS_DIR}/errorvsepsilon_median_summary.csv"
-    if not os.path.exists(summary_file):
-        log(f"Missing summary CSV: {summary_file}", "ERROR")
-        return False
-
-    df = pd.read_csv(summary_file)
-    if df.empty:
-        log("Summary CSV is empty", "ERROR")
-        return False
-
-    if 'seed_size_bit' not in df.columns:
-        df['seed_size_bit'] = np.nan
-
-    def normalize_seed_bit(value):
-        if pd.isna(value):
-            return None
-        try:
-            return int(value)
-        except Exception:
-            return None
-
-    def seed_sort_key(seed_size_bit):
-        if seed_size_bit is None:
-            return (1, 0)
-        return (0, int(seed_size_bit))
-
-    def seed_label(seed_size_bit):
-        if seed_size_bit is None:
-            return "default seed"
-        return f"seed=2^{seed_size_bit}"
-
-    label_map = {
-        'naive': '$\\Delta$-inadmissible distribution',
-        'naive_uniform': 'Uniform distribution',
-        'naive_fourwise': '4-wise independent distribution',
-    }
-    color_map = {
-        'naive': 'navy',
-        'naive_uniform': 'orange',
-        'naive_fourwise': 'forestgreen',
-    }
-    marker_map = {
-        'naive': 'o',
-        'naive_uniform': 's',
-        'naive_fourwise': '^',
-    }
-    linestyle_cycle = ['-', '--', '-.', ':']
-    target_modes = ['naive', 'naive_uniform', 'naive_fourwise']
-
-    fig, ax = plt.subplots(figsize=(15, 10))
-    plotted_any = False
-
-    for psi_mode in target_modes:
-        mode_df = df[df['psi_mode'] == psi_mode]
-        if mode_df.empty:
-            continue
-
-        mode_df = mode_df.copy()
-        mode_df['seed_size_bit_norm'] = mode_df['seed_size_bit'].apply(normalize_seed_bit)
-        seed_bits = sorted(mode_df['seed_size_bit_norm'].drop_duplicates().tolist(), key=seed_sort_key)
-
-        for line_idx, seed_size_bit in enumerate(seed_bits):
-            curve_df = mode_df[mode_df['seed_size_bit_norm'] == seed_size_bit].copy()
-            if curve_df.empty:
-                continue
-
-            curve_df = curve_df.groupby('epsilon', as_index=False)['median_error'].mean()
-            curve_df = curve_df.sort_values('epsilon')
-            epsilons = curve_df['epsilon'].astype(float).to_list()
-            medians = curve_df['median_error'].astype(float).to_list()
-            if not epsilons:
-                continue
-
-            ax.plot(
-                epsilons,
-                medians,
-                marker=marker_map.get(psi_mode, 'o'),
-                linewidth=2.4,
-                linestyle=linestyle_cycle[line_idx % len(linestyle_cycle)],
-                color=color_map.get(psi_mode),
-                label=f"{label_map.get(psi_mode, psi_mode)} ({seed_label(seed_size_bit)})"
-            )
-            plotted_any = True
-
-    if not plotted_any:
-        log("No valid rows for target psi modes in summary CSV", "ERROR")
-        plt.close(fig)
-        return False
-
-    ax.set_xlabel(r'$1/\sqrt{k}$', fontsize=25)
-    ax.set_ylabel('Median Accuracy Error', fontsize=25)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper left', fontsize=25)
-
-    box_plot_file = f"{PLOTS_DIR}/error_boxplot.png"
-    fig.tight_layout()
-    fig.savefig(box_plot_file, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-    log(f"Error-vs-epsilon plot saved to {box_plot_file} (from existing CSV)")
-    return True
 
 def create_seed_optimization_d_stability_plot(analysis_results):
     """Create seed optimization plot with explicit y-axis truncation markers."""
@@ -1329,138 +2422,113 @@ def create_seed_optimization_d_stability_plot(analysis_results):
         log("No valid data for seed optimization plot", "WARNING")
         return False
 
-    fig, ax = plt.subplots(figsize=(10.5, 7.2))
+    # Match paper panel scale more closely: same style, smaller layout footprint.
+    init_plotting(7.2, 4.2, 16)
+    fig, ax = plt.subplots(figsize=(PLOT_WIDTH, PLOT_HEIGHT))
 
     markers = ['o', 's', '^', 'D', 'v', '*', 'x']
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
 
-    # Start truncation from the point (d=5, seed=2^7), as requested.
-    trunc_start = None
-    target_d = 5
-    target_seed = 2**7
-    for seed_size, y_val in grouped.get(target_d, []):
-        if seed_size == target_seed:
-            trunc_start = float(y_val)
-            break
-
     all_y = np.array([float(y) for points in grouped.values() for _, y in points], dtype=float)
-    if trunc_start is None:
-        if all_y.size == 0:
-            log("No valid y values for plotting", "WARNING")
-            return False
-        trunc_start = float(np.percentile(all_y, 80))
-        log("Target point (d=5, 2^7) not found, fallback to percentile truncation.", "WARNING")
+    if all_y.size == 0:
+        log("No valid y values for plotting", "WARNING")
+        return False
 
-    y_top = max(trunc_start * 1.03, 0.05)
+    # Show the second-largest value on-axis (e.g., d=6 at 2^6 ~= 1.61),
+    # and clip only the extreme outlier(s) above this range.
+    if all_y.size >= 2:
+        visible_max = float(np.partition(all_y, -2)[-2])
+    else:
+        visible_max = float(all_y.max())
+    y_top = max(visible_max * 1.08, 0.05)
 
-    clip_margin = max(y_top * 0.03, 1e-6)
-    y_cap = y_top - clip_margin
-    all_x = sorted({p[0] for pts in grouped.values() for p in pts})
+    all_x = sorted({int(np.log2(p[0])) for pts in grouped.values() for p in pts})
     x_span = max(all_x) - min(all_x) if len(all_x) >= 2 else 1.0
-    break_dx = max(x_span * 0.006, 0.6)
+    break_dx = max(x_span * 0.02, 0.05)
 
     # Plot curves with clipping markers
     for idx, d_val in enumerate(sorted(grouped.keys())):
         points = sorted(grouped[d_val], key=lambda x: x[0])
-        x_vals = [p[0] for p in points]
+        x_vals = [int(np.log2(p[0])) for p in points]
         y_vals = [p[1] for p in points]
 
         color = colors[idx % len(colors)]
         marker_style = markers[idx % len(markers)]
-        y_plot = []
+        y_plot = [y if y <= y_top else np.nan for y in y_vals]
         clipped_points = []
         for x, y in zip(x_vals, y_vals):
-            forced_start = (d_val == target_d and x == target_seed)
-            if forced_start or (y > trunc_start):
-                y_plot.append(y_cap)
-                clipped_points.append((x, y))
+            if y > y_top:
+                clipped_points.append((x, float(y)))
+
+        # Plot true values so slope is physically correct; axis clipping handles overflow.
+        line_alpha = 0.75
+        marker_face = color
+        marker_edge_width = 1.2
+        marker_size = PLOT_MARKER_SIZE
+        if d_val == 8:
+            # Keep d=7 visible when d=8 overlaps it.
+            marker_face = 'none'
+            marker_edge_width = 2.0
+            marker_size = PLOT_MARKER_SIZE + 1
+        ax.plot(
+            x_vals,
+            y_plot,
+            marker=marker_style,
+            linestyle='-',
+            linewidth=2.4,
+            markersize=marker_size,
+            color=color,
+            alpha=line_alpha,
+            markerfacecolor=marker_face,
+            markeredgewidth=marker_edge_width,
+            label=f'd = {d_val}',
+            zorder=2
+        )
+
+        # Draw top-boundary clip markers where the true line crosses y_top.
+        dy = y_top * 0.012
+        for i in range(len(x_vals) - 1):
+            x1, y1 = float(x_vals[i]), float(y_vals[i])
+            x2, y2 = float(x_vals[i + 1]), float(y_vals[i + 1])
+            above1 = y1 > y_top
+            above2 = y2 > y_top
+            if above1 == above2:
+                continue
+            if abs(y2 - y1) < 1e-12 or abs(x2 - x1) < 1e-12:
+                continue
+
+            t = (y_top - y1) / (y2 - y1)
+            x_cross = x1 + t * (x2 - x1)
+            # For readability, enforce a minimum horizontal span for the visible
+            # clipped transition so it does not look nearly vertical.
+            min_in_dx = min(max(abs(x2 - x1) * 0.22, 0.20), abs(x2 - x1) * 0.45)
+            if above1 and not above2:
+                x_cross_vis = min(x_cross, x2 - min_in_dx)
+                x_in_start, y_in_start = x_cross_vis, y_top
+                x_in_end, y_in_end = x2, y2
+            elif (not above1) and above2:
+                x_cross_vis = max(x_cross, x1 + min_in_dx)
+                x_in_start, y_in_start = x1, y1
+                x_in_end, y_in_end = x_cross_vis, y_top
             else:
-                y_plot.append(y)
+                continue
 
-        # For d=5, remove the connecting segment between 2^6 and 2^7 since
-        # 2^7 is already shown as a truncated point.
-        if d_val == 5 and (2**6 in x_vals) and (2**7 in x_vals):
-            i1 = x_vals.index(2**6)
-            i2 = x_vals.index(2**7)
-            left_x = x_vals[:i1 + 1]
-            left_y = y_plot[:i1 + 1]
-            right_x = x_vals[i2:]
-            right_y = y_plot[i2:]
-
-            if len(left_x) >= 2:
-                ax.plot(
-                    left_x,
-                    left_y,
-                    linestyle='-',
-                    linewidth=2.4,
-                    color=color,
-                    zorder=2
-                )
-
-            if len(right_x) >= 2:
-                ax.plot(
-                    right_x,
-                    right_y,
-                    linestyle='-',
-                    linewidth=2.4,
-                    color=color,
-                    zorder=2
-                )
-
-            # Keep markers visible at every point.
+            # Inside-border clipped continuation (stylized for readability).
             ax.plot(
-                x_vals,
-                y_plot,
-                marker=marker_style,
-                linestyle='None',
-                markersize=7,
+                [x_in_start, x_in_end],
+                [y_in_start, y_in_end],
                 color=color,
-                zorder=3
-            )
-            # Proxy legend handle to show both line and marker for d=5.
-            ax.plot(
-                [], [],
-                marker=marker_style,
-                linestyle='-',
                 linewidth=2.4,
-                markersize=7,
-                color=color,
-                label=f'd = {d_val}'
-            )
-        else:
-            ax.plot(
-                x_vals,
-                y_plot,
-                marker=marker_style,
-                linestyle='-',
-                linewidth=2.4,
-                markersize=7,
-                color=color,
-                label=f'd = {d_val}',
-                zorder=2
-            )
-
-        # Draw break glyphs and clipped upward stubs for truncated points.
-        for x, _ in clipped_points:
-            dx = break_dx
-            dy = y_top * 0.012
-            y_break = y_cap + dy * 0.05
-
-            # A short upward stub that exceeds y-limit and gets clipped by axes.
-            ax.plot(
-                [x, x],
-                [y_cap + dy * 0.2, y_top + dy * 0.9],
-                color=color,
-                linewidth=2.2,
-                alpha=0.9,
+                alpha=0.95,
                 solid_capstyle='round',
-                zorder=8,
-                clip_on=False
+                zorder=8
             )
 
-            # Two small diagonal cuts on the line (similar to line-break style).
+            # // marker just above the top border at the crossing.
+            y_break = y_top + dy * 0.22
+            dx = break_dx * 0.75
             ax.plot(
-                [x - dx, x - dx / 3],
+                [x_cross_vis - dx, x_cross_vis - dx / 3],
                 [y_break - dy, y_break + dy],
                 color='black',
                 linewidth=2.4,
@@ -1469,7 +2537,7 @@ def create_seed_optimization_d_stability_plot(analysis_results):
                 clip_on=False
             )
             ax.plot(
-                [x + dx / 3, x + dx],
+                [x_cross_vis + dx / 3, x_cross_vis + dx],
                 [y_break - dy, y_break + dy],
                 color='black',
                 linewidth=2.4,
@@ -1479,18 +2547,25 @@ def create_seed_optimization_d_stability_plot(analysis_results):
             )
 
     # Labels
-    ax.set_xlabel('Seed Size', fontsize=22, labelpad=10)
-    ax.set_ylabel('Median Accuracy Error', fontsize=22, labelpad=10)
+    ax.set_xlabel('Seed Size n')
+    ax.set_ylabel('Accuracy Error')
 
     # X ticks as powers of 2
     ax.set_xticks(all_x)
-    ax.set_xticklabels(
-        [f"$2^{{{int(np.log2(x))}}}$" for x in all_x],
-        fontsize=17
-    )
-    ax.tick_params(axis='y', labelsize=17)
+    ax.set_xticklabels([f"$2^{{{int(x)}}}$" for x in all_x])
 
     ax.set_ylim(0, y_top)
+
+    # Reference target line.
+    ax.axhline(
+        0.05,
+        color='forestgreen',
+        linestyle='--',
+        linewidth=1.8,
+        alpha=0.75,
+        label=r'$\epsilon = 0.05$',
+        zorder=1
+    )
 
     # Grid
     ax.grid(True, linestyle='--', alpha=0.25, linewidth=0.8)
@@ -1507,106 +2582,60 @@ def create_seed_optimization_d_stability_plot(analysis_results):
     ax.spines['left'].set_linewidth(1.2)
     ax.spines['bottom'].set_linewidth(1.2)
 
-    # Draw // on y-axis, placed lower so it looks like a real axis break
-    slash_kwargs = dict(
+    # Draw // on the top of y-axis spine with the same style/size as line clips.
+    dy = y_top * 0.012
+    dx = break_dx * 0.75
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+    x_range = max(x_max - x_min, 1e-12)
+    y_range = max(y_max - y_min, 1e-12)
+    dx_axes = dx / x_range
+    dy_axes = dy / y_range
+    x_break_axis = 0.0
+    y_break_axis = 1.0 + dy_axes * 0.22
+    ax.plot(
+        [x_break_axis - dx_axes, x_break_axis - dx_axes / 3],
+        [y_break_axis - dy_axes, y_break_axis + dy_axes],
         transform=ax.transAxes,
         color='black',
-        clip_on=False,
-        linewidth=2.8,
+        linewidth=2.4,
+        solid_capstyle='round',
         zorder=20,
-        solid_capstyle='round'
-    )
-
-    y_axis_break = 0.88
-    ax.plot(
-        [-0.020, -0.008],
-        [y_axis_break - 0.015, y_axis_break + 0.015],
-        **slash_kwargs
+        clip_on=False
     )
     ax.plot(
-        [0.002, 0.014],
-        [y_axis_break - 0.015, y_axis_break + 0.015],
-        **slash_kwargs
+        [x_break_axis + dx_axes / 3, x_break_axis + dx_axes],
+        [y_break_axis - dy_axes, y_break_axis + dy_axes],
+        transform=ax.transAxes,
+        color='black',
+        linewidth=2.4,
+        solid_capstyle='round',
+        zorder=20,
+        clip_on=False
     )
 
     # Legend
-    ax.legend(
-        fontsize=13,
-        frameon=True,
-        fancybox=True,
-        framealpha=0.95,
-        edgecolor='0.85',
-        loc='upper right'
-    )
-
-    # Use fixed margins instead of tight_layout to avoid layout warnings
-    # when using large fonts, legend, and off-axis break markers.
-    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.13, top=0.97)
+    ax.legend(frameon=False, loc='upper right', fontsize=14)
 
     plot_file = f"{PLOTS_DIR}/seed_optimization_seedsize_vs_error.png"
-    plt.savefig(plot_file, dpi=400)
-    plt.close()
+    plot_file_pdf = f"{PLOTS_DIR}/seed_optimization_seedsize_vs_error.pdf"
+    fig.tight_layout()
+    fig.savefig(plot_file, dpi=220, bbox_inches='tight')
+    fig.savefig(plot_file_pdf, bbox_inches='tight')
+    plt.close(fig)
 
-    log(f"Seed optimization plot saved to {plot_file}")
-    return True
-
-def create_epsilon_plots(analysis_results):
-    """Create one combined plot for epsilon vs mean/max errors."""
-    if plt is None:
-        return False
-
-    log("Creating epsilon analysis plots...")
-    
-    if not analysis_results:
-        log("No analysis results for epsilon plots", "ERROR")
-        return False
-    
-    epsilon_values = []
-    mean_errors = []
-    max_errors = []
-
-    for result in analysis_results.values():
-        if result.get('mode', DEFAULT_TEST_MODE) != ACTIVE_TEST_MODE:
-            continue
-        epsilon_values.append(1.0 / np.sqrt(result['mom_k']))
-        mean_errors.append(result['mean_error'])
-        max_errors.append(result['max_error'])
-
-    if not epsilon_values:
-        log("No valid epsilon data to plot", "WARNING")
-        return False
-
-    sorted_data = sorted(zip(epsilon_values, mean_errors, max_errors))
-    epsilon_values, mean_errors, max_errors = zip(*sorted_data)
-
-    plt.figure(figsize=(12, 8))
-    plt.plot(epsilon_values, mean_errors, marker='o', linewidth=2.5, markersize=8, label='Mean Error')
-    plt.plot(epsilon_values, max_errors, marker='s', linewidth=2.5, markersize=8, label='Max Error')
-    plt.xlabel('ε', fontsize=14)
-    plt.ylabel('Actual Error', fontsize=14)
-    plt.title('Actual Error vs ε', fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3, which='both')
-
-    plot_file = f"{PLOTS_DIR}/epsilon_vs_error_combined.png"
-    plt.tight_layout()
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    plt.close()
-
-    log(f"Combined epsilon plot saved to {plot_file}")
-    
+    log(f"Seed optimization plot saved to {plot_file} and {plot_file_pdf}")
     return True
 
 def create_errorvsepsilon_boxplot(analysis_results):
     """Create error-vs-epsilon plot with one median-error curve per (psi_mode, seed_size_bit)."""
     if plt is None:
         return False
+    init_plotting(8 * 1.2, 4.944271909999159 * 1.2, 20)
 
     if not analysis_results:
         log("No analysis results to plot", "ERROR")
         return False
-
-    plt.rcParams.update({'font.size': 25})
 
     def seed_sort_key(seed_size_bit):
         if seed_size_bit is None:
@@ -1699,38 +2728,74 @@ def create_errorvsepsilon_boxplot(analysis_results):
     pd.DataFrame(summary_rows).to_csv(summary_file, index=False)
     log(f"Median summary saved to {summary_file}")
 
-    fig, ax = plt.subplots(figsize=(15, 10))
+    # ===== plot: per-seed `ours` lines + collapsed `uniform r` line (paper figure style) =====
+    SEED_COLORS  = {6: "#1f77b4", 7: "#d62728", 8: "#ff7f0e"}
+    SEED_MARKERS = {6: "o",       7: "D",       8: "s"}
+    SEED_HOLLOW  = {6: False,     7: True,      8: False}
+    UNIFORM_COLOR  = "#2ca02c"
+    UNIFORM_MARKER = "o"
+
+    def ours_label(sb):
+        return rf"ours ($n=2^{{{sb}}}$)" if sb is not None else "ours"
+
+    fig, ax = plt.subplots()
     plotted_any = False
 
-    for psi_mode in target_modes:
-        seed_size_bits = sorted(
-            {seed_size_bit for mode, seed_size_bit in grouped if mode == psi_mode},
-            key=seed_sort_key
-        )
-        if not seed_size_bits:
+    # naive: one solid line per seed, with realworld-style colors/markers
+    naive_seeds = sorted(
+        {sb for mode, sb in grouped if mode == 'naive'},
+        key=seed_sort_key
+    )
+    for sb in naive_seeds:
+        points = grouped.get(('naive', sb), [])
+        if not points:
             continue
+        by_epsilon = {}
+        for epsilon, median_error in points:
+            by_epsilon.setdefault(float(epsilon), []).append(float(median_error))
+        epsilons = sorted(by_epsilon.keys())
+        medians = [float(np.mean(by_epsilon[eps])) for eps in epsilons]
+        if not epsilons:
+            continue
+        hollow = SEED_HOLLOW.get(sb, False)
+        color  = SEED_COLORS.get(sb, "gray")
+        ax.plot(
+            epsilons, medians,
+            marker=SEED_MARKERS.get(sb, "o"),
+            linewidth=2.4, markersize=7,
+            linestyle="-",
+            color=color,
+            markerfacecolor="none" if hollow else color,
+            markeredgecolor=color,
+            markeredgewidth=2.0,
+            alpha=0.75,
+            label=ours_label(sb),
+        )
+        plotted_any = True
 
-        for line_idx, seed_size_bit in enumerate(seed_size_bits):
-            points = grouped.get((psi_mode, seed_size_bit), [])
-            if not points:
-                continue
-
-            by_epsilon = {}
-            for epsilon, median_error in points:
-                by_epsilon.setdefault(float(epsilon), []).append(float(median_error))
-            epsilons = sorted(by_epsilon.keys())
-            medians = [float(np.mean(by_epsilon[eps])) for eps in epsilons]
-            if not epsilons:
-                continue
-
+    # naive_uniform: collapse across seeds into one dashed line (uniform randomness
+    # is independent of seed_size_bit, so per-seed curves are redundant).
+    uniform_pairs = []
+    for (mode, sb), pts in grouped.items():
+        if mode == 'naive_uniform':
+            uniform_pairs.extend(pts)
+    if uniform_pairs:
+        by_epsilon = {}
+        for epsilon, median_error in uniform_pairs:
+            by_epsilon.setdefault(float(epsilon), []).append(float(median_error))
+        epsilons = sorted(by_epsilon.keys())
+        medians = [float(np.mean(by_epsilon[eps])) for eps in epsilons]
+        if epsilons:
             ax.plot(
-                epsilons,
-                medians,
-                marker=marker_map.get(psi_mode, 'o'),
-                linewidth=2.4,
-                linestyle=linestyle_cycle[line_idx % len(linestyle_cycle)],
-                color=color_map.get(psi_mode),
-                label=f"{label_map.get(psi_mode, psi_mode)} ({seed_label(seed_size_bit)})"
+                epsilons, medians,
+                marker=UNIFORM_MARKER,
+                linewidth=2.4, markersize=7,
+                linestyle="--",
+                color=UNIFORM_COLOR,
+                markeredgecolor=UNIFORM_COLOR,
+                markeredgewidth=2.0,
+                alpha=0.75,
+                label=r"uniform $\mathbf{r}$",
             )
             plotted_any = True
 
@@ -1739,61 +2804,85 @@ def create_errorvsepsilon_boxplot(analysis_results):
         plt.close(fig)
         return False
 
-    ax.set_xlabel(r'$1/\sqrt{k}$', fontsize=25)
-    ax.set_ylabel('Accuracy Error', fontsize=25)
-
+    ax.set_xlabel(r'$1/\sqrt{k}$')
+    ax.set_ylabel('Accuracy Error')
     ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper left', fontsize=25)
+    ax.legend(loc='upper left', frameon=False, fontsize=18)
 
     box_plot_file = f"{PLOTS_DIR}/error_boxplot.png"
+    box_plot_pdf  = f"{PLOTS_DIR}/error_boxplot.pdf"
     fig.tight_layout()
     fig.savefig(box_plot_file, dpi=300, bbox_inches='tight')
+    fig.savefig(box_plot_pdf, bbox_inches='tight')
     plt.close(fig)
 
-    log(f"Error-vs-epsilon plot saved to {box_plot_file}")
+    log(f"Error-vs-epsilon plot saved to {box_plot_file} and {box_plot_pdf}")
 
     return True
 
-def create_plots(analysis_results, use_existing_csv=False):
+def create_plots(analysis_results):
     """Create plots from analysis results"""
 
     log("Creating plots...")
-    if ACTIVE_TEST_MODE == "kttune":
-        log("Skipping plot generation for kttune mode", "WARNING")
-        return True
     if ACTIVE_TEST_MODE == "seed_optimization":
         return create_seed_optimization_d_stability_plot(analysis_results)
     if ACTIVE_TEST_MODE == "errorvsepsilon":
-        if use_existing_csv:
-            return create_errorvsepsilon_boxplot_from_csv()
         return create_errorvsepsilon_boxplot(analysis_results)
+    if ACTIVE_TEST_MODE == "maxsetsupport":
+        log("Skipping plot generation for maxsetsupport mode", "WARNING")
+        return True
 
 
 # ==================== MAIN FUNCTIONS ====================
 
 def main():
     """Main function"""
-    global VERBOSE, NUM_RUNS_PER_POINT, FILTER_PRG_DD, FILTER_MOM_K, FILTER_MOM_T, PORT_BASE
+    global VERBOSE, NUM_RUNS_PER_POINT, FILTER_PRG_DD, FILTER_MOM_K, FILTER_MOM_T, PORT_BASE, SKIP_KILL_EXISTING, MAXSETSUPPORT_SKIP_BASELINE_ABOVE
 
     parser = argparse.ArgumentParser(description='Batch PSI testing with parameter scanning')
+    # ---------- Pipeline actions (what to run) ----------
     parser.add_argument('--run-tests', action='store_true', help='Run the batch tests')
     parser.add_argument('--analyze', action='store_true', help='Analyze existing results')
     parser.add_argument('--plot', action='store_true', help='Create plots (runs analysis first)')
     parser.add_argument('--plot-only', action='store_true', help='Create plots only from existing summary/analysis files (no re-analysis, no summary rewrite)')
-    parser.add_argument('--errorvsepsilon-parallel', action='store_true', help='For each parameter pair in errorvsepsilon mode, launch parallel worker runs, merge results, then analyze+plot')
-    parser.add_argument('--parallel-workers', type=int, default=None, help='Number of parallel workers per parameter pair in errorvsepsilon parallel mode (default: auto from core count)')
-    parser.add_argument('--worker-num-runs', type=int, default=None, help='--num-runs value passed to each worker in errorvsepsilon parallel mode (default: auto = ceil(NUM_RUNS_PER_POINT / workers))')
-    parser.add_argument('--target-cores', type=int, default=None, help='Target core budget for auto worker sizing (default: detected CPU cores)')
-    parser.add_argument('--run-dir', type=str, default=None, help='Specify run directory (e.g., ./experiments/run_20260218_163843)')
+
+    # ---------- Mode selection + parallel orchestration ----------
     parser.add_argument('--param-mode', choices=sorted(TEST_MODES.keys()), default=DEFAULT_TEST_MODE, help='Select which parameter grid to use')
+    parser.add_argument('--seed-optimization-parallel', '--seed_optimization_parallel', dest='seed_optimization_parallel', action='store_true', help='For each parameter pair in seed_optimization mode, launch parallel worker runs, merge results, then analyze+plot')
+    parser.add_argument('--errorvsepsilon-parallel', action='store_true', help='For each parameter pair in errorvsepsilon mode, launch parallel worker runs, merge results, then analyze+plot')
+    parser.add_argument('--maxsetsupport-parallel', action='store_true', help='For maxsetsupport: process one (prg_dd,seed_size) combo at a time; parallelize workers within that combo until target runs are filled')
+    parser.add_argument('--parallel-workers', type=int, default=None, help='Number of parallel workers for parallel pipelines (auto-sized from CPU when omitted)')
+    parser.add_argument('--worker-num-runs', type=int, default=None, help='--num-runs value passed to each worker (default: auto = ceil(NUM_RUNS_PER_POINT / workers))')
+    parser.add_argument('--target-cores', '--target-core', dest='target_cores', type=int, default=None, help='Target core budget for auto worker sizing (default: detected CPU cores)')
+
+    # ---------- General run configuration ----------
+    parser.add_argument('--run-dir', type=str, default=None, help='Specify run directory (e.g., ./experiments/run_20260218_163843)')
     parser.add_argument('--num-runs', type=int, default=NUM_RUNS_PER_POINT, help='Number of runs per parameter combination')
+    parser.add_argument('--port-base', type=int, default=PORT_BASE, help='Base port used by test runs (set automatically per worker in parallel mode)')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--skip-kill-existing', action='store_true', help='Do not pkill existing psi_server/psi_client before starting tests (useful for parallel worker subprocesses)')
+
+    # ---------- Sweep filters (narrow the param grid for debugging / per-cell workers) ----------
     parser.add_argument('--only-prg-dd', type=int, default=None, help='Optional filter: run only this prg_dd value')
     parser.add_argument('--only-mom-k', type=int, default=None, help='Optional filter: run only this mom_k value')
     parser.add_argument('--only-mom-t', type=int, default=None, help='Optional filter: run only this mom_t value')
-    parser.add_argument('--port-base', type=int, default=PORT_BASE, help='Base port used by test runs (set automatically per worker in parallel mode)')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+
+    # ---------- maxsetsupport-specific ----------
+    parser.add_argument('--skip-baseline-above', type=int, default=None, help='For maxsetsupport: skip full (d,seed) combos whose baseline setexp is above this cap')
+
+    # ---------- Internal: worker subprocess plumbing for --maxsetsupport-parallel ----------
+    # These flags are set by the parent orchestrator when spawning workers; users should not pass them directly.
+    parser.add_argument('--maxsetsupport-worker-single', action='store_true', help='Internal worker mode: run a single maxsetsupport (d,seed,setexp) combo')
+    parser.add_argument('--worker-seed-size-bit', type=int, default=None, help='Internal worker arg for --maxsetsupport-worker-single')
+    parser.add_argument('--worker-total-set-exp', type=int, default=None, help='Internal worker arg for --maxsetsupport-worker-single')
+    parser.add_argument('--worker-psi-mode', type=str, default='naive', help='Internal worker arg for --maxsetsupport-worker-single')
     
     args = parser.parse_args()
+
+    parallel_flag_count = sum([args.seed_optimization_parallel, args.errorvsepsilon_parallel, args.maxsetsupport_parallel])
+    if parallel_flag_count > 1:
+        log("Choose only one parallel mode flag: --seed-optimization-parallel, --errorvsepsilon-parallel, or --maxsetsupport-parallel", "ERROR")
+        return 1
     
     VERBOSE = args.verbose
     NUM_RUNS_PER_POINT = args.num_runs
@@ -1801,16 +2890,84 @@ def main():
     FILTER_MOM_K = args.only_mom_k
     FILTER_MOM_T = args.only_mom_t
     PORT_BASE = args.port_base
+    SKIP_KILL_EXISTING = args.skip_kill_existing
+    MAXSETSUPPORT_SKIP_BASELINE_ABOVE = args.skip_baseline_above
+    if MAXSETSUPPORT_SKIP_BASELINE_ABOVE is not None and MAXSETSUPPORT_SKIP_BASELINE_ABOVE < 1:
+        log("--skip-baseline-above must be >= 1", "ERROR")
+        return 1
     apply_test_mode(args.param_mode)
     
     # Set run directory if specified
     if args.run_dir:
         set_run_directory(args.run_dir)
-    
-    # Ensure directories exist
+
+    # Ensure directories exist for normal test/analyze/plot pipelines
     ensure_directories()
     log(f"Using param mode '{ACTIVE_TEST_MODE}' with prg_dd={PRG_DD_VALUES}, kt_pairs={MOM_KT_PAIRS}")
-    log_errorvsepsilon_seed_size_once()
+    log_config_seedsize()
+
+    if args.maxsetsupport_worker_single:
+        if ACTIVE_TEST_MODE != "maxsetsupport":
+            log("--maxsetsupport-worker-single requires --param-mode maxsetsupport", "ERROR")
+            return 1
+        if args.worker_seed_size_bit is None or args.worker_total_set_exp is None:
+            log("--maxsetsupport-worker-single requires --worker-seed-size-bit and --worker-total-set-exp", "ERROR")
+            return 1
+        success = run_maxsetsupport_single_exp_worker(
+            seed_size_bit=args.worker_seed_size_bit,
+            total_set_size_exp=args.worker_total_set_exp,
+            psi_mode=args.worker_psi_mode or "naive",
+        )
+        return 0 if success else 1
+
+    if args.seed_optimization_parallel:
+        if ACTIVE_TEST_MODE != "seed_optimization":
+            log("--seed-optimization-parallel requires --param-mode seed_optimization", "ERROR")
+            return 1
+        if args.parallel_workers is not None and args.parallel_workers <= 0:
+            log("--parallel-workers must be > 0", "ERROR")
+            return 1
+        if args.worker_num_runs is not None and args.worker_num_runs <= 0:
+            log("--worker-num-runs must be > 0", "ERROR")
+            return 1
+
+        if args.target_cores is not None and args.target_cores <= 0:
+            log("--target-cores must be > 0", "ERROR")
+            return 1
+
+        if args.parallel_workers is None:
+            auto_workers, auto_cores, per_worker_psi = recommend_parallel_workers_for_cores(args.target_cores)
+            selected_workers = auto_workers
+            log(
+                f"Auto worker sizing: target_cores={auto_cores}, "
+                f"psi_processes_per_worker={per_worker_psi}, "
+                f"selected_workers={selected_workers}"
+            )
+        else:
+            selected_workers = args.parallel_workers
+
+        if args.worker_num_runs is None:
+            selected_worker_num_runs = compute_worker_num_runs(NUM_RUNS_PER_POINT, selected_workers)
+            log(
+                f"Auto worker-num-runs: total_runs_per_point={NUM_RUNS_PER_POINT}, "
+                f"workers={selected_workers}, worker_num_runs={selected_worker_num_runs}"
+            )
+        else:
+            selected_worker_num_runs = args.worker_num_runs
+
+        log(
+            f"Running parallel seed_optimization pipeline with workers={selected_workers}, "
+            f"worker_num_runs={selected_worker_num_runs}"
+        )
+        success = run_seed_optimization_parallel_pipeline(
+            parallel_workers=selected_workers,
+            worker_num_runs=selected_worker_num_runs
+        )
+        if not success:
+            log("Parallel seed_optimization pipeline failed", "ERROR")
+            return 1
+        log("Batch test pipeline completed successfully!")
+        return 0
 
     if args.errorvsepsilon_parallel:
         if ACTIVE_TEST_MODE != "errorvsepsilon":
@@ -1860,6 +3017,34 @@ def main():
             return 1
         log("Batch test pipeline completed successfully!")
         return 0
+
+    if args.maxsetsupport_parallel:
+        if ACTIVE_TEST_MODE != "maxsetsupport":
+            log("--maxsetsupport-parallel requires --param-mode maxsetsupport", "ERROR")
+            return 1
+        if args.target_cores is not None and args.target_cores <= 0:
+            log("--target-cores must be > 0", "ERROR")
+            return 1
+        if args.parallel_workers is None:
+            selected_workers, selected_cores, per_worker_psi = recommend_parallel_workers_for_cores(args.target_cores)
+            log(
+                f"Auto worker sizing for maxsetsupport: target_cores={selected_cores}, "
+                f"psi_processes_per_worker={per_worker_psi}, "
+                f"selected_workers={selected_workers}"
+            )
+        elif args.parallel_workers <= 0:
+            log("--parallel-workers must be > 0", "ERROR")
+            return 1
+        else:
+            selected_workers = args.parallel_workers
+
+        log(f"Running maxsetsupport parallel pipeline with workers={selected_workers}")
+        success = run_maxsetsupport_parallel_pipeline(parallel_workers=selected_workers)
+        if not success:
+            log("Parallel maxsetsupport pipeline failed", "ERROR")
+            return 1
+        log("Batch test pipeline completed successfully!")
+        return 0
     
     if args.run_tests:
         log("Starting batch tests...")
@@ -1869,22 +3054,11 @@ def main():
             return 1
     
     if args.plot_only:
-        if ACTIVE_TEST_MODE == "kttune":
-            log("Exporting kttune summary from existing analysis...")
-        elif ACTIVE_TEST_MODE == "errorvsepsilon":
-            log("Creating plots from existing summary CSV (no re-analysis)...")
+        if ACTIVE_TEST_MODE == "maxsetsupport":
+            log("Creating maxsetsupport summary from existing analysis...")
         else:
             log("Creating plots from existing analysis...")
 
-        # plot-only for errorvsepsilon: use existing CSV only, do not rewrite CSV.
-        if ACTIVE_TEST_MODE == "errorvsepsilon":
-            success = create_plots(None, use_existing_csv=True)
-            if not success:
-                log("Plot-only failed: ensure errorvsepsilon_median_summary.csv exists", "ERROR")
-                return 1
-            return 0
-
-        # plot-only for other modes: use existing analysis only (no auto-analyze).
         analysis_results = None
         analysis_file = f"{RESULTS_DIR}/analysis_results.json"
         if os.path.exists(analysis_file):
@@ -1893,15 +3067,12 @@ def main():
         if not analysis_results:
             log("No analysis results found", "ERROR")
             return 1
-        if ACTIVE_TEST_MODE == "kttune":
-            success = export_kttune_summary(analysis_results)
+        if ACTIVE_TEST_MODE == "maxsetsupport":
+            success = summarize_maxsetsupport(analysis_results)
         else:
             success = create_plots(analysis_results)
         if not success:
-            if ACTIVE_TEST_MODE == "kttune":
-                log("kttune summary export failed", "WARNING")
-            else:
-                log("Plotting skipped because dependencies are unavailable", "WARNING")
+            log("Plotting skipped because dependencies are unavailable", "WARNING")
             return 0
         return 0
     
@@ -1911,13 +3082,14 @@ def main():
         if not analysis_results:
             log("Analysis failed", "ERROR")
             return 1
+        if ACTIVE_TEST_MODE == "maxsetsupport" and not args.plot:
+            summarize_maxsetsupport(analysis_results)
 
     if args.plot:
-        if ACTIVE_TEST_MODE == "kttune":
-            log("Exporting kttune summary...")
-            success = export_kttune_summary(analysis_results)
+        if ACTIVE_TEST_MODE == "maxsetsupport":
+            success = summarize_maxsetsupport(analysis_results)
             if not success:
-                log("kttune summary export failed", "WARNING")
+                log("maxsetsupport summary export failed", "WARNING")
         else:
             log("Creating plots...")
             success = create_plots(analysis_results)
@@ -1938,10 +3110,10 @@ def main():
             log("Analysis failed", "ERROR")
             return 1
 
-        if ACTIVE_TEST_MODE == "kttune":
-            success = export_kttune_summary(analysis_results)
+        if ACTIVE_TEST_MODE == "maxsetsupport":
+            success = summarize_maxsetsupport(analysis_results)
             if not success:
-                log("kttune summary export failed", "WARNING")
+                log("maxsetsupport summary export failed", "WARNING")
         else:
             success = create_plots(analysis_results)
             if not success:
