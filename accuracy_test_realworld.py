@@ -53,7 +53,7 @@ import pandas as pd
 
 # ==================== CONFIGURABLE PARAMETERS ====================
 
-UCI_DATA_FILE = "./uci_words/docword.nips.txt"  # any UCI BoW file
+UCI_DATA_FILE = "./uci_words/docword.nytimes.txt"  # any UCI BoW file
 NUM_CLIENTS_PER_SERVER = 1   # client processes per server side
 UNIVERSAL_SIZE_BIT = 24      # must match psi_server / psi_client build
 PORT_BASE = 22000

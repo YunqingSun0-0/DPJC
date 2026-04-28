@@ -47,7 +47,7 @@ Exits 0 on pass, 1 on fail.
 **Local mode (default)** — wraps `fhe_test_single.py`:
 ```bash
 ./fhe_run_seed_tests.sh                       # default seed bits = (10)
-./fhe_run_seed_tests.sh --seed-bits "6 7 8"   # custom sweep
+./fhe_run_seed_tests.sh --seed-bits "7 8 9 10"   # custom sweep
 ./fhe_run_seed_tests.sh --mode local --set-size-bit 5 --prg-dd 6
 ```
 

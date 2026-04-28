@@ -28,7 +28,7 @@ NUM_CLIENTS_PER_SERVER = 1
 TIMEOUT_SECONDS = 300  # For both data generation and PSI execution
 VERBOSE = True
 PORT_BASE = 21000  # Base port for tests
-NUM_RUNS_PER_POINT = 10  # Total runs per parameter combination
+NUM_RUNS_PER_POINT = 1000  # Total runs per parameter combination
 # Output directories
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 BASE_RUN_DIR = f"./experiments/run_{RUN_TIMESTAMP}"
