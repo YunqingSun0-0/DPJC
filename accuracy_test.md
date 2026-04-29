@@ -49,7 +49,7 @@ Each run creates `./experiments/realworld_<timestamp>/`:
 ### Notes
 
 - The script runs `pkill -f psi_server / psi_client` on startup; close any other PSI jobs first.
-- `mom_k * mom_t` must stay ≤ 8192 (global protocol limit).
+- `mom_k * mom_t` must stay ≤ `seal_degree` (default: 16384).
 
 ## Uniform Data Testing
 
@@ -86,5 +86,5 @@ Output: `experiments/run_<timestamp>/plots/errorvsepsilon_*.png|pdf` and `result
 ### Notes
 
 - Both modes are resumable: rerun with the same `--run-dir` and completed `(d, k, seed, mode)` combinations are skipped.
-- `mom_k * mom_t` must stay ≤ 8192 (global protocol limit).
+- `mom_k * mom_t` must stay ≤ `seal_degree` (default: 16384).
 - The script runs `pkill -f psi_server / psi_client` on startup; close any other PSI jobs first.

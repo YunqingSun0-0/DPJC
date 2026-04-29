@@ -28,7 +28,7 @@ void run_server(int server_id) {
     }
     
     // 执行server端的PSI计算
-    int psi_size = psi_server(server_id, server_io, client_connections);
+    int64_t psi_size = psi_server(server_id, server_io, client_connections);
     
     if(server_id == 2){
         std::cerr << "[Server" << server_id << "] Final PSI size: " << psi_size << std::endl;

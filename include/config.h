@@ -21,14 +21,15 @@ struct GlobalConfig {
     uint64_t prg_dd = 7;
 
     int mom_kk = 400, mom_tt = 11; // median of means
+    bool weighted_mode = false; // enable weighted-safe 2PC recovery path in FHE mode
 
-    size_t seal_degree = 8192;
+    size_t seal_degree = 16384;
     size_t seal_plain_modulus = 24;
-    std::vector<int> seal_coeff_modulus = { 60, 60, 36, 27, 27 };
+    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};
     /*
     input_size; seal_plain_modulus; coeff_modulus; noise budget
     10; 20; 188 = { 52, 52, 36, 24, 24 }; {188, 136, 111, 76, 44, 12, 7}
-    10; 24; 210 = { 60, 60, 36, 27, 27 }; {210, 151, 122, 86, 50, 14, 9}
+    10; 24; 284 = { 54, 54, 54, 54, 50, 18 }; // tuned down from 438 to target ~20 noise-before-sharing
     10; 28;
     */
     

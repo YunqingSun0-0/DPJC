@@ -50,6 +50,8 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             seal_plain_modulus = std::stoul(val);
         } else if (auto val = get_value("--num_clients_per_server="); !val.empty()) {
             num_clients_per_server = std::stoi(val);
+        } else if (arg == "--weighted_mode") {
+            weighted_mode = true;
         } else if (arg == "--test_mode") {
             test_mode = true;
             std::mt19937 rng(std::chrono::system_clock::now().time_since_epoch().count());

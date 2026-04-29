@@ -144,7 +144,7 @@ Bit geq_unsigned(const Integer& a, const Integer& b) {
     return a_wide >= b_wide;
 }
 
-int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     if(get_config().test_mode) {
         uint64_t prg_seed = get_config().prg_seed;
         if(party == 1) {
@@ -428,118 +428,134 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
         io_bytes_before = server_io->counter;
     }
 
-    IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
-    const bool ole_sender_role = (party == BOB);
-    if (party == BOB) {
-        cot->setup_send();
-    } else {
-        cot->setup_recv();
-    }
-
-    // const int mpcbitlen = 24;
-    // const uint64_t plain_mod_u64 = parms.plain_modulus().value();
-    // const uint64_t mod23_u64 = plain_mod_u64 * 2 / 3;
-
-    // Integer modp(mpcbitlen, plain_mod_u64, PUBLIC);
-    // Integer mod23p(mpcbitlen, mod23_u64, PUBLIC);
-
-    // Integer *esti_sum = new Integer[get_config().mom_tt];
-
-    // for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-    //     Integer bucket_sum(mpcbitlen, 0, PUBLIC);
-
-    //     for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-    //         //   rnd_1 = alice local mask
-    //         //   rnd_2 = value decrypted from Bob's sent ciphertext
-    //         //
-    //         // On BOB:
-    //         //   rnd_1 = bob local mask
-    //         //   rnd_2 = value decrypted from Alice's sent ciphertext
-    //         //
-    //         // Target:
-    //         //   X = alice_rnd2 + bob_rnd1
-    //         //   Y = bob_rnd2   + alice_rnd1
-
-    //         Integer alice_rnd1(mpcbitlen, party == ALICE ? rnd_1[i] : 0, ALICE);
-    //         Integer alice_rnd2(mpcbitlen, party == ALICE ? rnd_2[i] : 0, ALICE);
-    //         Integer bob_rnd1  (mpcbitlen, party == BOB   ? rnd_1[i] : 0, BOB);
-    //         Integer bob_rnd2  (mpcbitlen, party == BOB   ? rnd_2[i] : 0, BOB);
-
-    //         // Reconstruct the two residues mod p
-    //         Integer x_mod = mod_add(alice_rnd2, bob_rnd1, modp);
-    //         Integer y_mod = mod_add(bob_rnd2, alice_rnd1, modp);
-
-    //         // Multiply mod p directly in MPC
-    //         Integer prod_mod = mod_mul(x_mod, y_mod, modp);
-
-    //         // Bucket sum in Z_p
-    //         bucket_sum = mod_add(bucket_sum, prod_mod, modp);
-    //     }
-
-    //     // Preserve original residue handling style:
-    //     // only interpret the final tt-bucket residue as signed-ish value
-    //     Bit over = geq_unsigned(bucket_sum, mod23p);
-    //     esti_sum[tt] = If(over, bucket_sum - modp, bucket_sum);
-    // }
-
-    // sort(esti_sum, get_config().mom_tt);
-    // int64_t psi_ca = esti_sum[get_config().mom_tt / 2].reveal<int64_t>(PUBLIC);
-
-    // delete[] esti_sum;
-    // finalize_semi_honest();
-
-    const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
-    const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
-
-    OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
-
-    const size_t rounds = static_cast<size_t>(tot_rounds);
-    std::vector<uint32_t> local_terms(rounds, 0u);
-    std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
-    std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
-
-    // Batch OLE across all rounds to reduce per-call protocol overhead.
-    for (size_t i = 0; i < rounds; ++i) {
-        const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
-        const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
-        const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
-        const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
-
-        local_terms[i] = (party == ALICE)
-            ? mul_mod_u32(xA, yA, plain_mod_u32)
-            : mul_mod_u32(xB, yB, plain_mod_u32);
-
-        cross1_in[i] = (party == ALICE) ? xA : yB;
-        cross2_in[i] = (party == ALICE) ? yA : xB;
-    }
-    ole.compute(cross1_out, cross1_in);
-    ole.compute(cross2_out, cross2_in);
-
-    int64_t *esti_sum = new int64_t[get_config().mom_tt];
-
-    for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-        uint32_t bucket_share = 0;
-
-        for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-            uint32_t prod_share = local_terms[i];
-            prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
-            prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
-
-            bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+    int64_t psi_ca = 0;
+    if (!config.weighted_mode) {
+        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+        const bool ole_sender_role = (party == BOB);
+        if (party == BOB) {
+            cot->setup_send();
+        } else {
+            cot->setup_recv();
         }
 
-        uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+        const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
+        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
 
-        esti_sum[tt] = (bucket_sum >= mod23_u32)
-            ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
-            : (int64_t)bucket_sum;
+        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
+
+        const size_t rounds = static_cast<size_t>(tot_rounds);
+        std::vector<uint32_t> local_terms(rounds, 0u);
+        std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
+        std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
+
+        for (size_t i = 0; i < rounds; ++i) {
+            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+            local_terms[i] = (party == ALICE)
+                ? mul_mod_u32(xA, yA, plain_mod_u32)
+                : mul_mod_u32(xB, yB, plain_mod_u32);
+
+            cross1_in[i] = (party == ALICE) ? xA : yB;
+            cross2_in[i] = (party == ALICE) ? yA : xB;
+        }
+        ole.compute(cross1_out, cross1_in);
+        ole.compute(cross2_out, cross2_in);
+
+        int64_t *esti_sum = new int64_t[get_config().mom_tt];
+
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            uint32_t bucket_share = 0;
+
+            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+                uint32_t prod_share = local_terms[i];
+                prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+                prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+            }
+
+            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+            esti_sum[tt] = (bucket_sum >= mod23_u32)
+                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
+                : (int64_t)bucket_sum;
+        }
+
+        std::sort(esti_sum, esti_sum + get_config().mom_tt);
+        psi_ca = esti_sum[get_config().mom_tt / 2];
+
+        delete[] esti_sum;
+        delete cot;
+    } else {
+        // Weighted path under IKNP:
+        // keep the same IKNP/OLE flow, and additionally recover centered
+        // residues per round to avoid mod-p product wraparound in weighted
+        // multiplication.
+        const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
+        const uint32_t half_mod_u32 = plain_mod_u32 / 2;
+        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+        const bool ole_sender_role = (party == BOB);
+        if (party == BOB) {
+            cot->setup_send();
+        } else {
+            cot->setup_recv();
+        }
+
+        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
+        const size_t rounds = static_cast<size_t>(tot_rounds);
+        std::vector<uint32_t> local_terms(rounds, 0u);
+        std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
+        std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
+
+        for (size_t i = 0; i < rounds; ++i) {
+            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+            local_terms[i] = (party == ALICE)
+                ? mul_mod_u32(xA, yA, plain_mod_u32)
+                : mul_mod_u32(xB, yB, plain_mod_u32);
+            cross1_in[i] = (party == ALICE) ? xA : yB;
+            cross2_in[i] = (party == ALICE) ? yA : xB;
+        }
+        ole.compute(cross1_out, cross1_in);
+        ole.compute(cross2_out, cross2_in);
+
+        int64_t *esti_sum = new int64_t[get_config().mom_tt];
+
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            __int128 bucket_sum = 0;
+            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+                uint32_t prod_share_modp = local_terms[i];
+                prod_share_modp = add_mod_u32(prod_share_modp, cross1_out[i], plain_mod_u32);
+                prod_share_modp = add_mod_u32(prod_share_modp, cross2_out[i], plain_mod_u32);
+                (void)prod_share_modp;
+
+                const uint32_t x_share = (party == ALICE) ? (uint32_t)rnd_2[i] : (uint32_t)rnd_1[i];
+                const uint32_t y_share = (party == ALICE) ? (uint32_t)rnd_1[i] : (uint32_t)rnd_2[i];
+
+                const uint32_t x_mod = reveal_share_u32_modp(x_share, plain_mod_u32, party, server_io);
+                const uint32_t y_mod = reveal_share_u32_modp(y_share, plain_mod_u32, party, server_io);
+
+                const int64_t x_signed = (x_mod >= half_mod_u32)
+                    ? ((int64_t)x_mod - (int64_t)plain_mod_u32)
+                    : (int64_t)x_mod;
+                const int64_t y_signed = (y_mod >= half_mod_u32)
+                    ? ((int64_t)y_mod - (int64_t)plain_mod_u32)
+                    : (int64_t)y_mod;
+
+                bucket_sum += (__int128)x_signed * (__int128)y_signed;
+            }
+            esti_sum[tt] = (int64_t)bucket_sum;
+        }
+
+        std::sort(esti_sum, esti_sum + get_config().mom_tt);
+        psi_ca = esti_sum[get_config().mom_tt / 2];
+        delete[] esti_sum;
+        delete cot;
     }
-
-    std::sort(esti_sum, esti_sum + get_config().mom_tt);
-    int64_t psi_ca = esti_sum[get_config().mom_tt / 2];
-
-    delete[] esti_sum;
-    delete cot;
 
     size_t mpc_comm = 0;
     if (party == 1) {
@@ -573,12 +589,7 @@ int psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& c
     return psi_ca / get_config().mom_kk;
 }
 
-int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& weighted_input, emp::NetIO* io) {
-    // FHE Phase 1: weight not yet supported by FHE protocol — extract values, drop weight.
-    std::vector<int> input_set;
-    input_set.reserve(weighted_input.size());
-    for (const auto& wi : weighted_input) input_set.push_back(wi.value);
-
+int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if(get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -627,10 +638,11 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput
     std::stack<std::pair<int, Ciphertext>> t_stack;
     AESGen aes_gen(0);
     std::vector<Ciphertext> calc_prg(config.prg_dd);
+    std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
+    Plaintext weight_plain;
 
-    for(size_t idx = 0; idx < input_set.size(); ++idx) {
-        auto item = input_set[idx];
-        std::vector<int> ids = aes_gen.get_id_group(0, item);
+    for(const auto& item : input_set) {
+        std::vector<int> ids = aes_gen.get_id_group(0, item.value);
         sort(ids.begin(), ids.end());
 
         // 处理PRG计算
@@ -649,6 +661,17 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput
                     t_map[key] = calc_prg[i];
                 }
             }
+        }
+
+        if (item.weight != 1) {
+            std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
+            ASSERT_MSG(item.weight > 0, "weight must be a positive integer");
+            uint64_t encoded_weight = static_cast<uint64_t>(item.weight);
+            for (int round = 0; round < tot_rounds; ++round) {
+                weight_slots[round] = encoded_weight;
+            }
+            batch_encoder.encode(weight_slots, weight_plain);
+            evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
         }
 
         // 多层乘法计算
@@ -702,7 +725,7 @@ int psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput
 // Naive PSI Implementation (Plaintext Version, Tug-of-War)
 // -----------------------------------------------------------
 
-int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     if(get_config().test_mode) {
         uint64_t prg_seed = get_config().prg_seed;
         if(party == 1) {
@@ -822,7 +845,7 @@ int psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>&
     }
 }
 
-int psi_client_naive(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+int64_t psi_client_naive(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if(get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -922,7 +945,7 @@ inline bool prf_bool_item_round(emp::PRG& prg, uint64_t item, uint64_t round) {
     return (tmp[0] & 1ULL) != 0;
 }
 
-int psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+int64_t psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     if(get_config().test_mode) {
         uint64_t prg_seed = get_config().prg_seed;
         if(party == 1) {
@@ -984,7 +1007,7 @@ int psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<emp::
     }
 }
 
-int psi_client_naive_uniform(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+int64_t psi_client_naive_uniform(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if (get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -1087,7 +1110,7 @@ inline uint64_t eval_deg3_horner(uint64_t x,
 }
 
 
-int psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+int64_t psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     //1. 发送prg_seed 给clients，保证server和clients使用相同的随机数
     if(get_config().test_mode) {
         uint64_t prg_seed = get_config().prg_seed;
@@ -1150,7 +1173,7 @@ int psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<emp:
     }
 }
 
-int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+int64_t psi_client_naive_fourwise(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     if (get_config().test_mode) {
         uint64_t prg_seed;
         io->recv_data(&prg_seed, sizeof(prg_seed));
@@ -1266,8 +1289,8 @@ int psi_client_naive_fourwise(int client_id, int server_id, const std::vector<We
 // -----------------------------------------------------------
 
 // 函数指针类型定义
-using PsiServerFunc = int(*)(int, emp::NetIO*, std::vector<emp::NetIO*>&);
-using PsiClientFunc = int(*)(int, int, const std::vector<WeightedInput>&, emp::NetIO*);
+using PsiServerFunc = int64_t(*)(int, emp::NetIO*, std::vector<emp::NetIO*>&);
+using PsiClientFunc = int64_t(*)(int, int, const std::vector<WeightedInput>&, emp::NetIO*);
 
 // 注册表
 static std::unordered_map<std::string, PsiServerFunc> server_registry;
@@ -1283,7 +1306,7 @@ void register_psi_client(const std::string& name, PsiClientFunc func) {
 }
 
 // 主函数 - 使用注册机制
-int psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
+int64_t psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     const GlobalConfig& config = get_config();
     std::string mode = config.psi_mode;
     
@@ -1294,7 +1317,7 @@ int psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& clien
     return server_registry[mode](party, server_io, client_connections);
 }
 
-int psi_client(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
+int64_t psi_client(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
     const GlobalConfig& config = get_config();
     std::string mode = config.psi_mode;
     

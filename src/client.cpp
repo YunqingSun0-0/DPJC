@@ -43,7 +43,7 @@ void run_client(int client_id, int server_id, const std::string& data_file = "")
     std::cout << "[Client" << client_id << "] input_set size: " << input_set.size() << std::endl;
     
     // 执行client端的PSI计算
-    int result = psi_client(client_id, server_id, input_set, client_io);
+    int64_t result = psi_client(client_id, server_id, input_set, client_io);
     
     std::cout << "[Client" << client_id << "] Processing completed" << std::endl;
     

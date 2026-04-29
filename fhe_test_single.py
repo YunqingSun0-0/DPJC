@@ -118,6 +118,20 @@ def wait_for_processes(processes, timeout=120):
         time.sleep(0.1)
     return False
 
+def read_gendata_config(config_path):
+    """Read key=value pairs from gendata config.txt"""
+    config = {}
+    if not os.path.exists(config_path):
+        return config
+    with open(config_path, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            config[key.strip()] = value.strip()
+    return config
+
 def extract_timing_from_output(processes):
     """Extract timing information from process output"""
     timing_data = {}
@@ -170,9 +184,14 @@ def extract_timing_from_output(processes):
             comm_match = re.search(r'Server recovery Communication: ([\d.]+) MB', output)
             if comm_match:
                 timing_data["server_recover_communication_mb"] = float(comm_match.group(1))
+
+            # Extract noise budget before sharing on each server
+            noise_before_sharing_match = re.search(r'noise budget - before sharing: (\d+)', output)
+            if noise_before_sharing_match:
+                timing_data[f"noise_before_sharing_server_{i+1}"] = int(noise_before_sharing_match.group(1))
             
             # Extract PSI size
-            psi_match = re.search(r'Final PSI size: (\d+)', output)
+            psi_match = re.search(r'Final PSI size: (-?\d+)', output)
             if psi_match:
                 timing_data["psi_size"] = int(psi_match.group(1))
             
@@ -219,13 +238,33 @@ def generate_test_data():
             log(f"Error: Generated data file not found: {file}", "ERROR")
             return False, None, None, None
     
-    # Calculate expected intersection size (simplified)
-    expected_intersection_size = INTERSECTION_SIZE
-    
+    # Prefer expected values produced by gendata itself.
+    config_path = f"{OUTPUT_DIR}/config.txt"
+    gendata_cfg = read_gendata_config(config_path)
+    expected_metric = "intersection_size"
+    expected_value = INTERSECTION_SIZE
+
+    if MAX_WEIGHT > 0:
+        if "weighted_intersection_sum" in gendata_cfg:
+            expected_metric = "weighted_intersection_sum"
+            expected_value = int(gendata_cfg["weighted_intersection_sum"])
+        elif "actual_intersection_size" in gendata_cfg:
+            expected_metric = "actual_intersection_size"
+            expected_value = int(gendata_cfg["actual_intersection_size"])
+            log("weighted_intersection_sum missing in config.txt; fallback to actual_intersection_size", "WARNING")
+        else:
+            log("config.txt missing weighted_intersection_sum; fallback to INTERSECTION_SIZE", "WARNING")
+    else:
+        if "actual_intersection_size" in gendata_cfg:
+            expected_metric = "actual_intersection_size"
+            expected_value = int(gendata_cfg["actual_intersection_size"])
+
+    expected_target = {"metric": expected_metric, "value": expected_value}
+
     log(f"Set size: {SET_SIZE}")
-    log(f"Expected intersection size: {expected_intersection_size}")
+    log(f"Expected {expected_metric}: {expected_value}")
     
-    return True, server1_files, server2_files, expected_intersection_size
+    return True, server1_files, server2_files, expected_target
 
 def run_fhe_test(server1_files, server2_files, seed_size_bit):
     """Run FHE PSI test"""
@@ -238,14 +277,15 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     network_mode = "lan"
     
     # Start servers with FHE mode
+    weighted_flag = " --weighted_mode" if MAX_WEIGHT > 0 else ""
     server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}"
+                  f"--network_mode={network_mode}{weighted_flag}"
     server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}"
+                  f"--network_mode={network_mode}{weighted_flag}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
     
@@ -260,7 +300,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}"
+                     f"--network_mode={network_mode}{weighted_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -272,7 +312,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}"
+                     f"--network_mode={network_mode}{weighted_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
     
@@ -301,7 +341,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     
     return True, timing_data
 
-def validate_results(expected_size, timing_data):
+def validate_results(expected_target, timing_data):
     """Validate test results"""
     log("=" * 50)
     log("VALIDATING RESULTS")
@@ -314,6 +354,9 @@ def validate_results(expected_size, timing_data):
     # Print timing information grouped by protocol phase, in protocol order.
     # Each entry: (key_or_prefix, "exact" | "prefix")
     timing_groups = [
+        ("Noise budget", [
+            ("noise_before_sharing_server_", "prefix"),
+        ]),
         ("Key generation", [
             ("key_gen_server_time_", "prefix"),
             ("key_gen_comm_mb", "exact"),
@@ -368,14 +411,19 @@ def validate_results(expected_size, timing_data):
     # Check PSI size if available
     if "psi_size" in timing_data:
         actual_size = timing_data["psi_size"]
-        tolerance = max(1, expected_size // 10)  # 10% tolerance
+        expected_value = int(expected_target["value"])
+        expected_metric = expected_target["metric"]
+        tolerance = max(1, expected_value // 10)  # 10% tolerance
         
-        if abs(actual_size - expected_size) > tolerance:
-            log(f"✗ Intersection size mismatch! Expected {expected_size}, got {actual_size}", "ERROR")
+        if abs(actual_size - expected_value) > tolerance:
+            log(
+                f"✗ PSI mismatch! Expected {expected_metric}={expected_value}, got psi_size={actual_size}",
+                "ERROR"
+            )
             return False
         else:
-            log(f"✓ Intersection size is correct (within tolerance)")
-            log(f"  Expected: {expected_size}, Actual: {actual_size}")
+            log(f"✓ PSI result is correct (within tolerance)")
+            log(f"  Expected {expected_metric}: {expected_value}, Actual psi_size: {actual_size}")
     else:
         log("Warning: Could not extract PSI size from output", "WARNING")
     
@@ -403,7 +451,7 @@ def test_fhe_psi(seed_size_bit):
     
     try:
         # Generate test data
-        success, server1_files, server2_files, expected_size = generate_test_data()
+        success, server1_files, server2_files, expected_target = generate_test_data()
         if not success:
             return False
         
@@ -413,7 +461,7 @@ def test_fhe_psi(seed_size_bit):
             return False
         
         # Validate results
-        success = validate_results(expected_size, timing_data)
+        success = validate_results(expected_target, timing_data)
         
         return success
         
