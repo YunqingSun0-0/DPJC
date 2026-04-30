@@ -23,6 +23,8 @@ struct GlobalConfig {
     int mom_kk = 400, mom_tt = 11; // median of means
     bool weighted_mode = false; // enable weighted-safe 2PC recovery path in FHE mode
     uint64_t weight_scale_div = 1; // if >1 in weighted mode, encode weight as round(weight / weight_scale_div)
+    bool weighted_multilimb_exact = false; // exact weighted recovery using per-round centered residues + limb multiplication (reveals per-round residues)
+    int weighted_limb_bits = 16; // limb width for weighted_multilimb_exact path
 
     size_t seal_degree = 16384;
     size_t seal_plain_modulus = 24;

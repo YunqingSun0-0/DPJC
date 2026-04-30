@@ -24,6 +24,8 @@ LOG_FILE = None  # Will be set based on set size
 INTERSECTION_SIZE = None  # Will be set by command-line argument or default
 MAX_WEIGHT = 0  # 0 = no weights (default); >0 = uniform random weights in [1, MAX_WEIGHT]
 WEIGHT_SCALE_DIV = 1  # weighted mode only: encode weight as round(weight / WEIGHT_SCALE_DIV)
+WEIGHTED_MULTILIMB_EXACT = False  # weighted mode only: exact recovery via multi-limb path (reveals per-round centered residues)
+WEIGHTED_LIMB_BITS = 16
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
@@ -326,14 +328,17 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     # Start servers with FHE mode
     weighted_flag = " --weighted_mode" if MAX_WEIGHT > 0 else ""
     weight_scale_flag = f" --weight_scale_div={WEIGHT_SCALE_DIV}" if MAX_WEIGHT > 0 else ""
+    weighted_multilimb_flag = ""
+    if MAX_WEIGHT > 0 and WEIGHTED_MULTILIMB_EXACT:
+        weighted_multilimb_flag = f" --weighted_multilimb_exact --weighted_limb_bits={WEIGHTED_LIMB_BITS}"
     server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
+                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}{weighted_multilimb_flag}"
     server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
+                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}{weighted_multilimb_flag}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
     
@@ -348,7 +353,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
+                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}{weighted_multilimb_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -360,7 +365,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
+                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}{weighted_multilimb_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
     
@@ -520,7 +525,8 @@ def test_fhe_psi(seed_size_bit):
 
 def main():
     """Main function"""
-    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE, MAX_WEIGHT, WEIGHT_SCALE_DIV
+    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER
+    global VERBOSE, MAX_WEIGHT, WEIGHT_SCALE_DIV, WEIGHTED_MULTILIMB_EXACT, WEIGHTED_LIMB_BITS
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -539,6 +545,11 @@ def main():
                        help='Weighted mode only: encode each weight as round(weight / weight_scale_div), '
                             'then server restores estimate by multiplying back weight_scale_div^2. '
                             'Default 0 = auto-pick from set_size_bit and max_weight; >0 = manual override.')
+    parser.add_argument('--weighted_multilimb_exact', action='store_true',
+                       help='Weighted mode only: use exact multi-limb recovery path in 2PC '
+                            '(reveals per-round centered residues between the two servers).')
+    parser.add_argument('--weighted_limb_bits', type=int, default=16,
+                       help='Weighted multi-limb mode only: limb bit-width in [1,16] (default: 16).')
     parser.add_argument('--output_log', type=str, default=None,
                        help='Output log file (default: fhe_test_<set_size_bit>.log)')
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -563,9 +574,14 @@ def main():
         WEIGHT_SCALE_DIV = 1
     else:
         WEIGHT_SCALE_DIV = args.weight_scale_div
+    WEIGHTED_MULTILIMB_EXACT = args.weighted_multilimb_exact
+    WEIGHTED_LIMB_BITS = args.weighted_limb_bits
     VERBOSE = args.verbose
     if WEIGHT_SCALE_DIV < 1:
         log("Error: --weight_scale_div must be >= 1", "ERROR")
+        return False
+    if WEIGHTED_LIMB_BITS < 1 or WEIGHTED_LIMB_BITS > 16:
+        log("Error: --weighted_limb_bits must be in [1,16]", "ERROR")
         return False
     
     if args.output_log:
@@ -589,6 +605,12 @@ def main():
             log(
                 f"Weight scale mode: auto (set_size={SET_SIZE}, max_weight={MAX_WEIGHT}, "
                 f"plain_modulus_bit={SEAL_PLAIN_MODULUS_BIT}, mom_k={MOM_K})"
+            )
+        if WEIGHTED_MULTILIMB_EXACT:
+            log(
+                f"Weighted exact recovery mode: multi-limb enabled (limb_bits={WEIGHTED_LIMB_BITS}); "
+                "this reveals per-round centered residues between servers",
+                "WARNING"
             )
     log(f"Logging to: {LOG_FILE}")
     

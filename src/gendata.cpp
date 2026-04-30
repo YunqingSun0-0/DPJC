@@ -448,7 +448,7 @@ int main(int argc, char** argv) {
     int set_size = 600;
     std::string output_dir = "./data";
     std::string uci_data_file;
-    int max_weight = 0;  // 0 = no weights (current default)
+    int64_t max_weight = 0;  // 0 = no weights (current default)
     uint64_t random_seed = std::chrono::system_clock::now().time_since_epoch().count();
     // WAN-mode-only args (LAN mode ignores these)
     std::string network_mode = "lan";
@@ -489,7 +489,15 @@ int main(int argc, char** argv) {
         } else if (auto val = get_value("--random_seed="); !val.empty()) {
             random_seed = std::stoull(val);
         } else if (auto val = get_value("--max_weight="); !val.empty()) {
-            max_weight = std::stoi(val);
+            try {
+                max_weight = std::stoll(val);
+            } catch (const std::invalid_argument&) {
+                std::cerr << "Error: invalid --max_weight value: " << val << std::endl;
+                return 1;
+            } catch (const std::out_of_range&) {
+                std::cerr << "Error: --max_weight out of int64 range: " << val << std::endl;
+                return 1;
+            }
         } else if (auto val = get_value("--network_mode="); !val.empty()) {
             network_mode = val;
         } else if (auto val = get_value("--port="); !val.empty()) {
@@ -659,13 +667,12 @@ int main(int argc, char** argv) {
         std::cerr << "Error: --max_weight must be non-negative" << std::endl;
         return 1;
     }
-
     int64_t weighted_intersection_sum = 0;
     bool emit_weights = max_weight > 0;
     std::vector<std::vector<WeightedWord>> weighted_sets_1, weighted_sets_2;
 
     if (emit_weights) {
-        std::uniform_int_distribution<int> weight_dist(1, max_weight);
+        std::uniform_int_distribution<int64_t> weight_dist(1, max_weight);
         weighted_sets_1.resize(num_clients_per_server);
         weighted_sets_2.resize(num_clients_per_server);
         for (int i = 0; i < num_clients_per_server; ++i) {

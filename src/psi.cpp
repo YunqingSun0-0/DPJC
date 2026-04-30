@@ -163,6 +163,52 @@ inline int64_t restore_weight_scale_if_needed(
     return static_cast<int64_t>(value);
 }
 
+inline uint64_t abs_u64_from_i64(int64_t v) {
+    if (v >= 0) {
+        return static_cast<uint64_t>(v);
+    }
+    // Handle INT64_MIN safely.
+    return static_cast<uint64_t>(-(v + 1)) + 1ULL;
+}
+
+inline __int128 mul_signed_via_limbs(int64_t x, int64_t y, int limb_bits) {
+    ASSERT_MSG(limb_bits >= 1 && limb_bits <= 16, "limb_bits must be in [1, 16]");
+    const uint64_t base_mask = (1ULL << limb_bits) - 1ULL;
+
+    const bool neg = ((x < 0) ^ (y < 0));
+    uint64_t ax = abs_u64_from_i64(x);
+    uint64_t ay = abs_u64_from_i64(y);
+
+    std::vector<uint64_t> x_limbs;
+    std::vector<uint64_t> y_limbs;
+    do {
+        x_limbs.push_back(ax & base_mask);
+        ax >>= limb_bits;
+    } while (ax != 0);
+    do {
+        y_limbs.push_back(ay & base_mask);
+        ay >>= limb_bits;
+    } while (ay != 0);
+
+    __int128 prod = 0;
+    for (size_t i = 0; i < x_limbs.size(); ++i) {
+        for (size_t j = 0; j < y_limbs.size(); ++j) {
+            const __int128 term = static_cast<__int128>(x_limbs[i]) * static_cast<__int128>(y_limbs[j]);
+            prod += (term << ((i + j) * limb_bits));
+        }
+    }
+
+    return neg ? -prod : prod;
+}
+
+inline int64_t checked_i64_from_i128(__int128 v, const char* err_msg) {
+    if (v > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
+        v < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+        throw std::runtime_error(err_msg);
+    }
+    return static_cast<int64_t>(v);
+}
+
 Bit geq_unsigned(const Integer& a, const Integer& b);
 
 Integer mod_add(const Integer& a, const Integer& b, const Integer& p) {
@@ -504,59 +550,96 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     const uint32_t plain_mod_u32 = static_cast<uint32_t>(plain_mod_u64);
 
     int64_t psi_ca = 0;
-    IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
-    const bool ole_sender_role = (party == BOB);
-    if (party == BOB) {
-        cot->setup_send();
-    } else {
-        cot->setup_recv();
+    const bool use_weighted_multilimb_exact =
+        (config.weighted_mode && config.weighted_multilimb_exact);
+    if (party == 1 && use_weighted_multilimb_exact) {
+        std::cerr << "[Server1] weighted_multilimb_exact enabled: "
+                  << "per-round centered residues are revealed between servers "
+                  << "(privacy tradeoff for exact recovery)." << std::endl;
     }
-
-    const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
-    OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
-
-    const size_t rounds = static_cast<size_t>(tot_rounds);
-    std::vector<uint32_t> local_terms(rounds, 0u);
-    std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
-    std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
-
-    for (size_t i = 0; i < rounds; ++i) {
-        const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
-        const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
-        const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
-        const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
-
-        local_terms[i] = (party == ALICE)
-            ? mul_mod_u32(xA, yA, plain_mod_u32)
-            : mul_mod_u32(xB, yB, plain_mod_u32);
-
-        cross1_in[i] = (party == ALICE) ? xA : yB;
-        cross2_in[i] = (party == ALICE) ? yA : xB;
-    }
-    ole.compute(cross1_out, cross1_in);
-    ole.compute(cross2_out, cross2_in);
 
     int64_t *esti_sum = new int64_t[get_config().mom_tt];
-    for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-        uint32_t bucket_share = 0;
-        for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-            uint32_t prod_share = local_terms[i];
-            prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
-            prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
-            bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+    if (use_weighted_multilimb_exact) {
+        const uint32_t half_mod_u32 = plain_mod_u32 / 2;
+        const int limb_bits = config.weighted_limb_bits;
+
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            __int128 bucket_sum = 0;
+            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+                const uint32_t x_share = (party == ALICE) ? (uint32_t)rnd_2[i] : (uint32_t)rnd_1[i];
+                const uint32_t y_share = (party == ALICE) ? (uint32_t)rnd_1[i] : (uint32_t)rnd_2[i];
+
+                const uint32_t x_mod = reveal_share_u32_modp(x_share, plain_mod_u32, party, server_io);
+                const uint32_t y_mod = reveal_share_u32_modp(y_share, plain_mod_u32, party, server_io);
+
+                const int64_t x_signed = (x_mod >= half_mod_u32)
+                    ? ((int64_t)x_mod - (int64_t)plain_mod_u32)
+                    : (int64_t)x_mod;
+                const int64_t y_signed = (y_mod >= half_mod_u32)
+                    ? ((int64_t)y_mod - (int64_t)plain_mod_u32)
+                    : (int64_t)y_mod;
+
+                bucket_sum += mul_signed_via_limbs(x_signed, y_signed, limb_bits);
+            }
+            esti_sum[tt] = checked_i64_from_i128(
+                bucket_sum,
+                "weighted_multilimb_exact bucket sum overflows int64_t"
+            );
+        }
+    } else {
+        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+        const bool ole_sender_role = (party == BOB);
+        if (party == BOB) {
+            cot->setup_send();
+        } else {
+            cot->setup_recv();
         }
 
-        // Reveal once per tt-bucket (small communication, limited leakage).
-        uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
-        esti_sum[tt] = (bucket_sum >= mod23_u32)
-            ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
-            : (int64_t)bucket_sum;
+        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
+        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
+
+        const size_t rounds = static_cast<size_t>(tot_rounds);
+        std::vector<uint32_t> local_terms(rounds, 0u);
+        std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
+        std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
+
+        for (size_t i = 0; i < rounds; ++i) {
+            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+            local_terms[i] = (party == ALICE)
+                ? mul_mod_u32(xA, yA, plain_mod_u32)
+                : mul_mod_u32(xB, yB, plain_mod_u32);
+
+            cross1_in[i] = (party == ALICE) ? xA : yB;
+            cross2_in[i] = (party == ALICE) ? yA : xB;
+        }
+        ole.compute(cross1_out, cross1_in);
+        ole.compute(cross2_out, cross2_in);
+
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            uint32_t bucket_share = 0;
+            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+                uint32_t prod_share = local_terms[i];
+                prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+                prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+            }
+
+            // Reveal once per tt-bucket (small communication, limited leakage).
+            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+            esti_sum[tt] = (bucket_sum >= mod23_u32)
+                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
+                : (int64_t)bucket_sum;
+        }
+        delete cot;
     }
 
     std::sort(esti_sum, esti_sum + get_config().mom_tt);
     psi_ca = esti_sum[get_config().mom_tt / 2];
     delete[] esti_sum;
-    delete cot;
 
     size_t mpc_comm = 0;
     if (party == 1) {

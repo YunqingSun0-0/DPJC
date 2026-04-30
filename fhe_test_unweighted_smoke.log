@@ -1,0 +1,119 @@
+[2026-04-30 02:05:15] [INFO] Starting FHE PSI test with set_size=2^1=2
+[2026-04-30 02:05:15] [INFO] Seed size: 2^8=256 bits
+[2026-04-30 02:05:15] [INFO] PRG DD: 8
+[2026-04-30 02:05:15] [INFO] Clients per server: 1
+[2026-04-30 02:05:15] [INFO] Total clients: 2
+[2026-04-30 02:05:15] [INFO] Max weight: 0 (unweighted)
+[2026-04-30 02:05:15] [INFO] Logging to: fhe_test_unweighted_smoke.log
+[2026-04-30 02:05:15] [INFO] Starting FHE PSI test...
+[2026-04-30 02:05:15] [INFO] ==================================================
+[2026-04-30 02:05:15] [INFO] GENERATING TEST DATA
+[2026-04-30 02:05:15] [INFO] ==================================================
+[2026-04-30 02:05:15] [INFO] Running: Data generation
+[2026-04-30 02:05:15] [INFO] ✓ Data generation completed successfully
+[2026-04-30 02:05:15] [INFO] Set size: 2
+[2026-04-30 02:05:15] [INFO] Expected actual_intersection_size: 1
+[2026-04-30 02:05:15] [INFO] ==================================================
+[2026-04-30 02:05:15] [INFO] RUNNING FHE PSI TEST
+[2026-04-30 02:05:15] [INFO] ==================================================
+[2026-04-30 02:05:15] [INFO] Starting Server 1 (FHE)
+[2026-04-30 02:05:15] [INFO] [Server 1 (FHE)] Starting Server 1 on port 22000
+[2026-04-30 02:05:15] [INFO] Starting Server 2 (FHE)
+[2026-04-30 02:05:15] [INFO] [Server 2 (FHE)] Starting Server 2 on port 22000
+[2026-04-30 02:05:16] [INFO] Starting Client 1 (Server 1)
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 1)] Starting Client 1 (Server 1)
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 1)] connected
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] connected
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 1)] [Client1] Loading data from file: ./test_fhe_single/client1_1.txt
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] connected
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 1)] [Client1] input_set size: 2
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] [Server1] mom_kk=400, mom_tt=11, total_rounds=4400
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 1)] [Client3] Phase 2: Processing input set
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] [Server1] Phase 1: Generating seeds and keys
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] /
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] | Encryption parameters :
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] |   scheme: BFV
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] |   poly_modulus_degree: 16384
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] |   coeff_modulus size: 284 (54 + 54 + 54 + 54 + 50 + 18) bits
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] |   plain_modulus: 16580609
+[2026-04-30 02:05:16] [INFO] [Server 1 (FHE)] \
+[2026-04-30 02:05:16] [INFO] Starting Client 1 (Server 2)
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 2)] Starting Client 1 (Server 2)
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 2)] connected
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] connected
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 2)] [Client1] Loading data from file: ./test_fhe_single/client1_2.txt
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] connected
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 2)] [Client1] input_set size: 2
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] [Server2] mom_kk=400, mom_tt=11, total_rounds=4400
+[2026-04-30 02:05:16] [INFO] [Client 1 (Server 2)] [Client4] Phase 2: Processing input set
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] [Server2] Phase 1: Generating seeds and keys
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] /
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] | Encryption parameters :
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] |   scheme: BFV
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] |   poly_modulus_degree: 16384
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] |   coeff_modulus size: 284 (54 + 54 + 54 + 54 + 50 + 18) bits
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] |   plain_modulus: 16580609
+[2026-04-30 02:05:16] [INFO] [Server 2 (FHE)] \
+[2026-04-30 02:05:17] [INFO] [Server 1 (FHE)] noise budget - encrypt seed: 234
+[2026-04-30 02:05:17] [INFO] [Server 2 (FHE)] noise budget - encrypt seed: 234
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] noise budget - multiply seed: 184
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] Key generation time: 2.88s
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] key_gen_comm_mb: 298.354
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] broadcast_comm_mb: 304.658
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] noise budget - multiply seed: 184
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] [Server2] Phase 2: Waiting for client processing
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 2)] [Client4] Using 1 thread for 2 items
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] [Server1] Phase 2: Waiting for client processing
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 1)] [Client3] Using 1 thread for 2 items
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 2)] Client computation time: 0.215s
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 2)] [Client4] Processing completed
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 2)] [Client1] Processing completed
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] [Server2] Client results aggregation time: 0.105ms (105us)
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] [Server2] Phase 3: Secret sharing and MPC computation
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] noise budget - before sharing: 53
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 1)] Client computation time: 0.214s
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 1)] [Client3] Processing completed
+[2026-04-30 02:05:19] [INFO] [Client 1 (Server 1)] [Client1] Processing completed
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] [Server1] Client results aggregation time: 0.103ms (103us)
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] client_server_comm_mb: 0.706
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] [Server1] Phase 3: Secret sharing and MPC computation
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] noise budget - before sharing: 53
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] 2PC communication: 3391729 bytes (3.23 MB)
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] server_2pc_time: 0.019s
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] Server recovery time: 0.0191s
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] Server recovery Communication: 3.23 MB
+[2026-04-30 02:05:19] [INFO] [Server 1 (FHE)] Total server time: 3.47s
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] [Server2] Final PSI size: 0
+[2026-04-30 02:05:19] [INFO] [Server 2 (FHE)] [Server2] Final PSI size: 0
+[2026-04-30 02:05:19] [INFO] Process 1 output captured (848 chars)
+[2026-04-30 02:05:19] [INFO] Process 2 output captured (635 chars)
+[2026-04-30 02:05:19] [INFO] Process 3 output captured (304 chars)
+[2026-04-30 02:05:19] [INFO] ==================================================
+[2026-04-30 02:05:19] [INFO] VALIDATING RESULTS
+[2026-04-30 02:05:19] [INFO] ==================================================
+[2026-04-30 02:05:19] [RESULT] Timing Results:
+[2026-04-30 02:05:19] [RESULT]   [Noise budget]
+[2026-04-30 02:05:19] [RESULT]     noise_before_sharing_server_1: 53
+[2026-04-30 02:05:19] [RESULT]     noise_before_sharing_server_2: 53
+[2026-04-30 02:05:19] [RESULT]   [Key generation]
+[2026-04-30 02:05:19] [RESULT]     key_gen_server_time_1: 2.88 s
+[2026-04-30 02:05:19] [RESULT]     key_gen_comm_mb: 298.354 MB
+[2026-04-30 02:05:19] [RESULT]     broadcast_comm_mb: 304.658 MB
+[2026-04-30 02:05:19] [RESULT]   [Client compute]
+[2026-04-30 02:05:19] [RESULT]     client_compute_time_3: 0.214 s
+[2026-04-30 02:05:19] [RESULT]     client_compute_time_4: 0.215 s
+[2026-04-30 02:05:19] [RESULT]   [Client -> Server comm]
+[2026-04-30 02:05:19] [RESULT]     client_server_comm_mb: 0.706 MB
+[2026-04-30 02:05:19] [RESULT]   [Aggregation]
+[2026-04-30 02:05:19] [RESULT]     aggregation_time_ms_1: 0.103 ms
+[2026-04-30 02:05:19] [RESULT]     aggregation_time_ms_2: 0.105 ms
+[2026-04-30 02:05:19] [RESULT]   [2PC]
+[2026-04-30 02:05:19] [RESULT]     server_2pc_time_1: 0.019 s
+[2026-04-30 02:05:19] [RESULT]     2PC_mb: 3.23 MB
+[2026-04-30 02:05:19] [INFO] ✓ PSI result is correct (within tolerance)
+[2026-04-30 02:05:19] [INFO]   Expected actual_intersection_size: 1, Actual psi_size: 0
+[2026-04-30 02:05:19] [INFO] Cleaned up test data directory
+[2026-04-30 02:05:19] [RESULT] ==================================================
+[2026-04-30 02:05:19] [RESULT] ✓ FHE PSI TEST PASSED
+[2026-04-30 02:05:19] [RESULT] ==================================================
+[2026-04-30 02:05:19] [RESULT] Log file saved to: fhe_test_unweighted_smoke.log

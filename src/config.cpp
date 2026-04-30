@@ -56,8 +56,15 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             if (weight_scale_div == 0) {
                 throw std::invalid_argument("--weight_scale_div must be >= 1");
             }
+        } else if (auto val = get_value("--weighted_limb_bits="); !val.empty()) {
+            weighted_limb_bits = std::stoi(val);
+            if (weighted_limb_bits <= 0 || weighted_limb_bits > 16) {
+                throw std::invalid_argument("--weighted_limb_bits must be in [1, 16]");
+            }
         } else if (arg == "--weighted_mode") {
             weighted_mode = true;
+        } else if (arg == "--weighted_multilimb_exact") {
+            weighted_multilimb_exact = true;
         } else if (arg == "--test_mode") {
             test_mode = true;
             std::mt19937 rng(std::chrono::system_clock::now().time_since_epoch().count());
