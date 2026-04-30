@@ -93,6 +93,21 @@ inline uint32_t mul_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
     return (uint32_t)(z % p);
 }
 
+inline uint32_t pow2_mod_u32(int exponent, uint32_t p) {
+    ASSERT_MSG(exponent >= 0, "pow2 exponent must be non-negative");
+    uint64_t result = 1 % p;
+    uint64_t base = 2 % p;
+    int e = exponent;
+    while (e > 0) {
+        if (e & 1) {
+            result = (result * base) % p;
+        }
+        base = (base * base) % p;
+        e >>= 1;
+    }
+    return static_cast<uint32_t>(result);
+}
+
 inline int ole_bit_length_from_plain_modulus(uint64_t plain_modulus) {
     if (plain_modulus < 2) {
         throw std::runtime_error("plain_modulus must be >= 2 for OLE recovery");
@@ -161,52 +176,6 @@ inline int64_t restore_weight_scale_if_needed(
         throw std::runtime_error("restored weighted estimate overflows int64_t");
     }
     return static_cast<int64_t>(value);
-}
-
-inline uint64_t abs_u64_from_i64(int64_t v) {
-    if (v >= 0) {
-        return static_cast<uint64_t>(v);
-    }
-    // Handle INT64_MIN safely.
-    return static_cast<uint64_t>(-(v + 1)) + 1ULL;
-}
-
-inline __int128 mul_signed_via_limbs(int64_t x, int64_t y, int limb_bits) {
-    ASSERT_MSG(limb_bits >= 1 && limb_bits <= 16, "limb_bits must be in [1, 16]");
-    const uint64_t base_mask = (1ULL << limb_bits) - 1ULL;
-
-    const bool neg = ((x < 0) ^ (y < 0));
-    uint64_t ax = abs_u64_from_i64(x);
-    uint64_t ay = abs_u64_from_i64(y);
-
-    std::vector<uint64_t> x_limbs;
-    std::vector<uint64_t> y_limbs;
-    do {
-        x_limbs.push_back(ax & base_mask);
-        ax >>= limb_bits;
-    } while (ax != 0);
-    do {
-        y_limbs.push_back(ay & base_mask);
-        ay >>= limb_bits;
-    } while (ay != 0);
-
-    __int128 prod = 0;
-    for (size_t i = 0; i < x_limbs.size(); ++i) {
-        for (size_t j = 0; j < y_limbs.size(); ++j) {
-            const __int128 term = static_cast<__int128>(x_limbs[i]) * static_cast<__int128>(y_limbs[j]);
-            prod += (term << ((i + j) * limb_bits));
-        }
-    }
-
-    return neg ? -prod : prod;
-}
-
-inline int64_t checked_i64_from_i128(__int128 v, const char* err_msg) {
-    if (v > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
-        v < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
-        throw std::runtime_error(err_msg);
-    }
-    return static_cast<int64_t>(v);
 }
 
 Bit geq_unsigned(const Integer& a, const Integer& b);
@@ -554,38 +523,112 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         (config.weighted_mode && config.weighted_multilimb_exact);
     if (party == 1 && use_weighted_multilimb_exact) {
         std::cerr << "[Server1] weighted_multilimb_exact enabled: "
-                  << "per-round centered residues are revealed between servers "
-                  << "(privacy tradeoff for exact recovery)." << std::endl;
+                  << "limb-decomposed OLE recovery (no per-round residue reveal)." << std::endl;
     }
 
     int64_t *esti_sum = new int64_t[get_config().mom_tt];
     if (use_weighted_multilimb_exact) {
-        const uint32_t half_mod_u32 = plain_mod_u32 / 2;
+        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+        const bool ole_sender_role = (party == BOB);
+        if (party == BOB) {
+            cot->setup_send();
+        } else {
+            cot->setup_recv();
+        }
+
+        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
+        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
+
         const int limb_bits = config.weighted_limb_bits;
+        ASSERT_MSG(limb_bits >= 1 && limb_bits <= 16, "weighted_limb_bits must be in [1, 16]");
+        const uint32_t mask = (1u << limb_bits) - 1u;
+        const uint32_t shift_limb_mod = pow2_mod_u32(limb_bits, plain_mod_u32);
+        const uint32_t shift_2limb_mod = pow2_mod_u32(2 * limb_bits, plain_mod_u32);
+
+        const size_t rounds = static_cast<size_t>(tot_rounds);
+
+        // Cross term 1: xA * yB (split into 4 limb products).
+        std::vector<uint32_t> in_xy_00(rounds), out_xy_00(rounds);
+        std::vector<uint32_t> in_xy_01(rounds), out_xy_01(rounds);
+        std::vector<uint32_t> in_xy_10(rounds), out_xy_10(rounds);
+        std::vector<uint32_t> in_xy_11(rounds), out_xy_11(rounds);
+
+        // Cross term 2: yA * xB (split into 4 limb products).
+        std::vector<uint32_t> in_yx_00(rounds), out_yx_00(rounds);
+        std::vector<uint32_t> in_yx_01(rounds), out_yx_01(rounds);
+        std::vector<uint32_t> in_yx_10(rounds), out_yx_10(rounds);
+        std::vector<uint32_t> in_yx_11(rounds), out_yx_11(rounds);
+
+        std::vector<uint32_t> local_terms(rounds, 0u);
+
+        for (size_t i = 0; i < rounds; ++i) {
+            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+            const uint32_t x_local = (party == ALICE) ? xA : xB;
+            const uint32_t y_local = (party == ALICE) ? yA : yB;
+            local_terms[i] = mul_mod_u32(x_local, y_local, plain_mod_u32);
+
+            const uint32_t xA0 = xA & mask, xA1 = xA >> limb_bits;
+            const uint32_t yA0 = yA & mask, yA1 = yA >> limb_bits;
+            const uint32_t xB0 = xB & mask, xB1 = xB >> limb_bits;
+            const uint32_t yB0 = yB & mask, yB1 = yB >> limb_bits;
+
+            // xA * yB
+            in_xy_00[i] = (party == ALICE) ? xA0 : yB0;
+            in_xy_01[i] = (party == ALICE) ? xA0 : yB1;
+            in_xy_10[i] = (party == ALICE) ? xA1 : yB0;
+            in_xy_11[i] = (party == ALICE) ? xA1 : yB1;
+
+            // yA * xB
+            in_yx_00[i] = (party == ALICE) ? yA0 : xB0;
+            in_yx_01[i] = (party == ALICE) ? yA0 : xB1;
+            in_yx_10[i] = (party == ALICE) ? yA1 : xB0;
+            in_yx_11[i] = (party == ALICE) ? yA1 : xB1;
+        }
+
+        ole.compute(out_xy_00, in_xy_00);
+        ole.compute(out_xy_01, in_xy_01);
+        ole.compute(out_xy_10, in_xy_10);
+        ole.compute(out_xy_11, in_xy_11);
+
+        ole.compute(out_yx_00, in_yx_00);
+        ole.compute(out_yx_01, in_yx_01);
+        ole.compute(out_yx_10, in_yx_10);
+        ole.compute(out_yx_11, in_yx_11);
 
         for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            __int128 bucket_sum = 0;
+            uint32_t bucket_share = 0;
             for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                const uint32_t x_share = (party == ALICE) ? (uint32_t)rnd_2[i] : (uint32_t)rnd_1[i];
-                const uint32_t y_share = (party == ALICE) ? (uint32_t)rnd_1[i] : (uint32_t)rnd_2[i];
+                uint32_t prod_share = local_terms[i];
 
-                const uint32_t x_mod = reveal_share_u32_modp(x_share, plain_mod_u32, party, server_io);
-                const uint32_t y_mod = reveal_share_u32_modp(y_share, plain_mod_u32, party, server_io);
+                uint32_t cross_xy = out_xy_00[i];
+                uint32_t cross_xy_01_10 = add_mod_u32(out_xy_01[i], out_xy_10[i], plain_mod_u32);
+                cross_xy_01_10 = mul_mod_u32(cross_xy_01_10, shift_limb_mod, plain_mod_u32);
+                uint32_t cross_xy_11 = mul_mod_u32(out_xy_11[i], shift_2limb_mod, plain_mod_u32);
+                cross_xy = add_mod_u32(cross_xy, cross_xy_01_10, plain_mod_u32);
+                cross_xy = add_mod_u32(cross_xy, cross_xy_11, plain_mod_u32);
 
-                const int64_t x_signed = (x_mod >= half_mod_u32)
-                    ? ((int64_t)x_mod - (int64_t)plain_mod_u32)
-                    : (int64_t)x_mod;
-                const int64_t y_signed = (y_mod >= half_mod_u32)
-                    ? ((int64_t)y_mod - (int64_t)plain_mod_u32)
-                    : (int64_t)y_mod;
+                uint32_t cross_yx = out_yx_00[i];
+                uint32_t cross_yx_01_10 = add_mod_u32(out_yx_01[i], out_yx_10[i], plain_mod_u32);
+                cross_yx_01_10 = mul_mod_u32(cross_yx_01_10, shift_limb_mod, plain_mod_u32);
+                uint32_t cross_yx_11 = mul_mod_u32(out_yx_11[i], shift_2limb_mod, plain_mod_u32);
+                cross_yx = add_mod_u32(cross_yx, cross_yx_01_10, plain_mod_u32);
+                cross_yx = add_mod_u32(cross_yx, cross_yx_11, plain_mod_u32);
 
-                bucket_sum += mul_signed_via_limbs(x_signed, y_signed, limb_bits);
+                prod_share = add_mod_u32(prod_share, cross_xy, plain_mod_u32);
+                prod_share = add_mod_u32(prod_share, cross_yx, plain_mod_u32);
+                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
             }
-            esti_sum[tt] = checked_i64_from_i128(
-                bucket_sum,
-                "weighted_multilimb_exact bucket sum overflows int64_t"
-            );
+
+            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+            esti_sum[tt] = (bucket_sum >= mod23_u32)
+                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
+                : (int64_t)bucket_sum;
         }
+        delete cot;
     } else {
         IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
         const bool ole_sender_role = (party == BOB);

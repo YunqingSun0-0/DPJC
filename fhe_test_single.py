@@ -24,7 +24,7 @@ LOG_FILE = None  # Will be set based on set size
 INTERSECTION_SIZE = None  # Will be set by command-line argument or default
 MAX_WEIGHT = 0  # 0 = no weights (default); >0 = uniform random weights in [1, MAX_WEIGHT]
 WEIGHT_SCALE_DIV = 1  # weighted mode only: encode weight as round(weight / WEIGHT_SCALE_DIV)
-WEIGHTED_MULTILIMB_EXACT = False  # weighted mode only: exact recovery via multi-limb path (reveals per-round centered residues)
+WEIGHTED_MULTILIMB_EXACT = False  # weighted mode only: limb-decomposed OLE path (no per-round residue reveal)
 WEIGHTED_LIMB_BITS = 16
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
@@ -546,8 +546,8 @@ def main():
                             'then server restores estimate by multiplying back weight_scale_div^2. '
                             'Default 0 = auto-pick from set_size_bit and max_weight; >0 = manual override.')
     parser.add_argument('--weighted_multilimb_exact', action='store_true',
-                       help='Weighted mode only: use exact multi-limb recovery path in 2PC '
-                            '(reveals per-round centered residues between the two servers).')
+                       help='Weighted mode only: use limb-decomposed OLE recovery path in 2PC '
+                            '(no per-round residue reveal; still modulo plain_modulus).')
     parser.add_argument('--weighted_limb_bits', type=int, default=16,
                        help='Weighted multi-limb mode only: limb bit-width in [1,16] (default: 16).')
     parser.add_argument('--output_log', type=str, default=None,
@@ -608,8 +608,8 @@ def main():
             )
         if WEIGHTED_MULTILIMB_EXACT:
             log(
-                f"Weighted exact recovery mode: multi-limb enabled (limb_bits={WEIGHTED_LIMB_BITS}); "
-                "this reveals per-round centered residues between servers",
+                f"Weighted multi-limb OLE mode enabled (limb_bits={WEIGHTED_LIMB_BITS}); "
+                "no per-round residue reveal, bucket-level reveal only",
                 "WARNING"
             )
     log(f"Logging to: {LOG_FILE}")
