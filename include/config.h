@@ -22,15 +22,25 @@ struct GlobalConfig {
 
     int mom_kk = 400, mom_tt = 11; // median of means
     bool weighted_mode = false; // enable weighted-safe 2PC recovery path in FHE mode
+    uint64_t weight_scale_div = 1; // if >1 in weighted mode, encode weight as round(weight / weight_scale_div)
 
     size_t seal_degree = 16384;
     size_t seal_plain_modulus = 24;
-    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};
-    /*
+    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18}; // for large plain modulus
+    /*python3 fhe_test_single.py \
+  --set_size_bit 8 \
+  --seed_size_bit 8 \
+  --prg_dd 8 \
+  --num_clients_per_server 1 \
+  --max_weight 4294967296 \
+  --output_log fhe_test_weight.log \
+  -v
     input_size; seal_plain_modulus; coeff_modulus; noise budget
     10; 20; 188 = { 52, 52, 36, 24, 24 }; {188, 136, 111, 76, 44, 12, 7}
     10; 24; 284 = { 54, 54, 54, 54, 50, 18 }; // tuned down from 438 to target ~20 noise-before-sharing
     10; 28;
+    {54, 54, 54, 54, 50, 18}; // for deal modulus = 24
+    {60, 60, 60, 60, 60, 60, 60, 18}; // for large plain modulus
     */
     
     int num_clients_per_server = 1;

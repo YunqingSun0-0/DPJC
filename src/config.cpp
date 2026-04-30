@@ -5,6 +5,7 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <stdexcept>
 
 GlobalConfig& get_config() {
     static GlobalConfig config;
@@ -50,6 +51,11 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             seal_plain_modulus = std::stoul(val);
         } else if (auto val = get_value("--num_clients_per_server="); !val.empty()) {
             num_clients_per_server = std::stoi(val);
+        } else if (auto val = get_value("--weight_scale_div="); !val.empty()) {
+            weight_scale_div = std::stoull(val);
+            if (weight_scale_div == 0) {
+                throw std::invalid_argument("--weight_scale_div must be >= 1");
+            }
         } else if (arg == "--weighted_mode") {
             weighted_mode = true;
         } else if (arg == "--test_mode") {

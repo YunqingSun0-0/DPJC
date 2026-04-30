@@ -13,6 +13,7 @@ import shutil
 import re
 import argparse
 import threading
+import math
 from datetime import datetime
 
 # ==================== CONFIGURABLE PARAMETERS ====================
@@ -22,9 +23,12 @@ SET_SIZE = None  # Will be set by command-line argument or default
 LOG_FILE = None  # Will be set based on set size
 INTERSECTION_SIZE = None  # Will be set by command-line argument or default
 MAX_WEIGHT = 0  # 0 = no weights (default); >0 = uniform random weights in [1, MAX_WEIGHT]
+WEIGHT_SCALE_DIV = 1  # weighted mode only: encode weight as round(weight / WEIGHT_SCALE_DIV)
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
+SEAL_PLAIN_MODULUS_BIT = 24
+MOM_K = 400
 
 # Test parameters
 VERBOSE = False  # Set True via --verbose to also stream INFO logs to the terminal
@@ -118,6 +122,49 @@ def wait_for_processes(processes, timeout=120):
         time.sleep(0.1)
     return False
 
+def _next_power_of_two(x: int) -> int:
+    """Return the smallest power of two >= x (x>=1)."""
+    if x <= 1:
+        return 1
+    return 1 << ((x - 1).bit_length())
+
+def auto_weight_scale_div(set_size: int, max_weight: int, plain_modulus_bit: int = 24, mom_k: int = 400) -> int:
+    """
+    Auto-pick weight_scale_div from set size and max weight.
+
+    Model (same random-weight mode as gendata):
+      - intersection ~= set_size / 2
+      - E[w] = (max_weight + 1) / 2
+      - E[weighted_intersection_sum] ~= intersection * E[w]^2
+      - one tt-bucket sums mom_k rounds, so expected bucket magnitude scales by mom_k
+
+    We pick scale so expected bucket stays around <= plain_modulus/2, then round up to power-of-two.
+    """
+    if max_weight <= 0:
+        return 1
+
+    set_size = max(1, int(set_size))
+    mom_k = max(1, int(mom_k))
+    plain_modulus_bit = max(2, int(plain_modulus_bit))
+
+    # BFV batching modulus is a prime close to 2^plain_modulus_bit.
+    plain_modulus_est = float((1 << plain_modulus_bit) - 1)
+    intersection_est = float(max(1, set_size // 2))
+    mean_weight = (float(max_weight) + 1.0) / 2.0
+    expected_weighted_sum = intersection_est * mean_weight * mean_weight
+    expected_bucket_sum = expected_weighted_sum * float(mom_k)
+
+    # Keep expected bucket around <= p/2 to limit wraparound in mod-p recovery.
+    target_bucket = plain_modulus_est / 2.0
+    required_from_bucket = math.sqrt(max(1.0, expected_bucket_sum / max(1.0, target_bucket)))
+
+    # Also ensure encoded weight is representable (< plain_modulus).
+    required_from_encoding = float(max_weight) / max(1.0, plain_modulus_est - 1.0)
+
+    required = max(1.0, required_from_bucket, required_from_encoding)
+    scale = _next_power_of_two(int(math.ceil(required)))
+    return max(1, scale)
+
 def read_gendata_config(config_path):
     """Read key=value pairs from gendata config.txt"""
     config = {}
@@ -181,7 +228,7 @@ def extract_timing_from_output(processes):
                 timing_data["client_server_comm_mb"] = float(client_server_comm_match.group(1))
 
             # Extract server recovery communication size
-            comm_match = re.search(r'Server recovery Communication: ([\d.]+) MB', output)
+            comm_match = re.search(r'Server recovery Communication: ([\d.eE+-]+) MB', output)
             if comm_match:
                 timing_data["server_recover_communication_mb"] = float(comm_match.group(1))
 
@@ -278,14 +325,15 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     
     # Start servers with FHE mode
     weighted_flag = " --weighted_mode" if MAX_WEIGHT > 0 else ""
+    weight_scale_flag = f" --weight_scale_div={WEIGHT_SCALE_DIV}" if MAX_WEIGHT > 0 else ""
     server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}{weighted_flag}"
+                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
     server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                  f"--network_mode={network_mode}{weighted_flag}"
+                  f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
     
@@ -300,7 +348,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}{weighted_flag}"
+                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
@@ -312,7 +360,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
-                     f"--network_mode={network_mode}{weighted_flag}"
+                     f"--network_mode={network_mode}{weighted_flag}{weight_scale_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
     
@@ -472,7 +520,7 @@ def test_fhe_psi(seed_size_bit):
 
 def main():
     """Main function"""
-    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE, MAX_WEIGHT
+    global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER, VERBOSE, MAX_WEIGHT, WEIGHT_SCALE_DIV
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -487,6 +535,10 @@ def main():
     parser.add_argument('--max_weight', type=int, default=0,
                        help='If >0, gendata assigns each element a uniform random weight in [1, max_weight]. '
                             'Default 0 = no weight column (unweighted).')
+    parser.add_argument('--weight_scale_div', type=int, default=0,
+                       help='Weighted mode only: encode each weight as round(weight / weight_scale_div), '
+                            'then server restores estimate by multiplying back weight_scale_div^2. '
+                            'Default 0 = auto-pick from set_size_bit and max_weight; >0 = manual override.')
     parser.add_argument('--output_log', type=str, default=None,
                        help='Output log file (default: fhe_test_<set_size_bit>.log)')
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -500,7 +552,21 @@ def main():
     PRG_DD = args.prg_dd
     NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
     MAX_WEIGHT = args.max_weight
+    if args.weight_scale_div == 0 and MAX_WEIGHT > 0:
+        WEIGHT_SCALE_DIV = auto_weight_scale_div(
+            set_size=SET_SIZE,
+            max_weight=MAX_WEIGHT,
+            plain_modulus_bit=SEAL_PLAIN_MODULUS_BIT,
+            mom_k=MOM_K
+        )
+    elif args.weight_scale_div == 0:
+        WEIGHT_SCALE_DIV = 1
+    else:
+        WEIGHT_SCALE_DIV = args.weight_scale_div
     VERBOSE = args.verbose
+    if WEIGHT_SCALE_DIV < 1:
+        log("Error: --weight_scale_div must be >= 1", "ERROR")
+        return False
     
     if args.output_log:
         LOG_FILE = args.output_log
@@ -517,6 +583,13 @@ def main():
     log(f"Clients per server: {NUM_CLIENTS_PER_SERVER}")
     log(f"Total clients: {2 * NUM_CLIENTS_PER_SERVER}")
     log(f"Max weight: {MAX_WEIGHT} ({'unweighted' if MAX_WEIGHT == 0 else f'random in [1, {MAX_WEIGHT}]'})")
+    if MAX_WEIGHT > 0:
+        log(f"Weight scale divisor: {WEIGHT_SCALE_DIV}")
+        if args.weight_scale_div == 0:
+            log(
+                f"Weight scale mode: auto (set_size={SET_SIZE}, max_weight={MAX_WEIGHT}, "
+                f"plain_modulus_bit={SEAL_PLAIN_MODULUS_BIT}, mom_k={MOM_K})"
+            )
     log(f"Logging to: {LOG_FILE}")
     
     # Run single correctness test

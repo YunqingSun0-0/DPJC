@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <iostream>
+#include <limits>
 #include "oleu32.h"
 using namespace seal;
 using namespace emp;
@@ -90,6 +91,76 @@ inline uint32_t add_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
 inline uint32_t mul_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
     uint64_t z = (uint64_t)a * (uint64_t)b;
     return (uint32_t)(z % p);
+}
+
+inline int ole_bit_length_from_plain_modulus(uint64_t plain_modulus) {
+    if (plain_modulus < 2) {
+        throw std::runtime_error("plain_modulus must be >= 2 for OLE recovery");
+    }
+    if (plain_modulus > static_cast<uint64_t>(UINT32_MAX)) {
+        throw std::runtime_error("plain_modulus exceeds OLE_U32 range (must be <= 2^32-1)");
+    }
+
+    uint32_t max_encoded_value = static_cast<uint32_t>(plain_modulus - 1);
+    int bit_length = 0;
+    do {
+        ++bit_length;
+        max_encoded_value >>= 1;
+    } while (max_encoded_value != 0u);
+    return bit_length;
+}
+
+inline uint64_t encode_weight_with_optional_scaling(
+    int64_t raw_weight,
+    uint64_t weight_scale_div,
+    uint64_t plain_modulus
+) {
+    ASSERT_MSG(raw_weight > 0, "weight must be a positive integer");
+    ASSERT_MSG(weight_scale_div >= 1, "weight_scale_div must be >= 1");
+    ASSERT_MSG(plain_modulus >= 2, "plain_modulus must be >= 2");
+
+    const uint64_t weight_u64 = static_cast<uint64_t>(raw_weight);
+    uint64_t encoded = weight_u64;
+    if (weight_scale_div > 1) {
+        // Round-to-nearest integer for positive weights.
+        encoded = (weight_u64 + (weight_scale_div / 2)) / weight_scale_div;
+        if (encoded == 0) {
+            encoded = 1;
+        }
+    }
+
+    if (encoded >= plain_modulus) {
+        std::ostringstream oss;
+        oss << "encoded weight " << encoded
+            << " must be < plain_modulus " << plain_modulus
+            << " (try increasing --weight_scale_div)";
+        throw std::runtime_error(oss.str());
+    }
+    return encoded;
+}
+
+inline int64_t restore_weight_scale_if_needed(
+    int64_t estimate_scaled,
+    int mom_kk,
+    bool weighted_mode,
+    uint64_t weight_scale_div
+) {
+    ASSERT_MSG(mom_kk > 0, "mom_kk must be positive");
+    __int128 value = static_cast<__int128>(estimate_scaled);
+
+    if (weighted_mode && weight_scale_div > 1) {
+        const __int128 scale_sq =
+            static_cast<__int128>(weight_scale_div) * static_cast<__int128>(weight_scale_div);
+        value *= scale_sq;
+    }
+
+    value /= static_cast<__int128>(mom_kk);
+
+    if (value > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
+        value < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+        throw std::runtime_error("restored weighted estimate overflows int64_t");
+    }
+    return static_cast<int64_t>(value);
 }
 
 Bit geq_unsigned(const Integer& a, const Integer& b);
@@ -428,134 +499,64 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         io_bytes_before = server_io->counter;
     }
 
+    const uint64_t plain_mod_u64 = parms.plain_modulus().value();
+    const int ole_bit_length = ole_bit_length_from_plain_modulus(plain_mod_u64);
+    const uint32_t plain_mod_u32 = static_cast<uint32_t>(plain_mod_u64);
+
     int64_t psi_ca = 0;
-    if (!config.weighted_mode) {
-        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
-        const bool ole_sender_role = (party == BOB);
-        if (party == BOB) {
-            cot->setup_send();
-        } else {
-            cot->setup_recv();
-        }
-
-        const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
-        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
-
-        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
-
-        const size_t rounds = static_cast<size_t>(tot_rounds);
-        std::vector<uint32_t> local_terms(rounds, 0u);
-        std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
-        std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
-
-        for (size_t i = 0; i < rounds; ++i) {
-            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
-            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
-            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
-            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
-
-            local_terms[i] = (party == ALICE)
-                ? mul_mod_u32(xA, yA, plain_mod_u32)
-                : mul_mod_u32(xB, yB, plain_mod_u32);
-
-            cross1_in[i] = (party == ALICE) ? xA : yB;
-            cross2_in[i] = (party == ALICE) ? yA : xB;
-        }
-        ole.compute(cross1_out, cross1_in);
-        ole.compute(cross2_out, cross2_in);
-
-        int64_t *esti_sum = new int64_t[get_config().mom_tt];
-
-        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            uint32_t bucket_share = 0;
-
-            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint32_t prod_share = local_terms[i];
-                prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
-                prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
-                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
-            }
-
-            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
-            esti_sum[tt] = (bucket_sum >= mod23_u32)
-                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
-                : (int64_t)bucket_sum;
-        }
-
-        std::sort(esti_sum, esti_sum + get_config().mom_tt);
-        psi_ca = esti_sum[get_config().mom_tt / 2];
-
-        delete[] esti_sum;
-        delete cot;
+    IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
+    const bool ole_sender_role = (party == BOB);
+    if (party == BOB) {
+        cot->setup_send();
     } else {
-        // Weighted path under IKNP:
-        // keep the same IKNP/OLE flow, and additionally recover centered
-        // residues per round to avoid mod-p product wraparound in weighted
-        // multiplication.
-        const uint32_t plain_mod_u32 = (uint32_t)parms.plain_modulus().value();
-        const uint32_t half_mod_u32 = plain_mod_u32 / 2;
-        IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
-        const bool ole_sender_role = (party == BOB);
-        if (party == BOB) {
-            cot->setup_send();
-        } else {
-            cot->setup_recv();
-        }
-
-        OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, 24, ole_sender_role);
-        const size_t rounds = static_cast<size_t>(tot_rounds);
-        std::vector<uint32_t> local_terms(rounds, 0u);
-        std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
-        std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
-
-        for (size_t i = 0; i < rounds; ++i) {
-            const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
-            const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
-            const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
-            const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
-
-            local_terms[i] = (party == ALICE)
-                ? mul_mod_u32(xA, yA, plain_mod_u32)
-                : mul_mod_u32(xB, yB, plain_mod_u32);
-            cross1_in[i] = (party == ALICE) ? xA : yB;
-            cross2_in[i] = (party == ALICE) ? yA : xB;
-        }
-        ole.compute(cross1_out, cross1_in);
-        ole.compute(cross2_out, cross2_in);
-
-        int64_t *esti_sum = new int64_t[get_config().mom_tt];
-
-        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            __int128 bucket_sum = 0;
-            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint32_t prod_share_modp = local_terms[i];
-                prod_share_modp = add_mod_u32(prod_share_modp, cross1_out[i], plain_mod_u32);
-                prod_share_modp = add_mod_u32(prod_share_modp, cross2_out[i], plain_mod_u32);
-                (void)prod_share_modp;
-
-                const uint32_t x_share = (party == ALICE) ? (uint32_t)rnd_2[i] : (uint32_t)rnd_1[i];
-                const uint32_t y_share = (party == ALICE) ? (uint32_t)rnd_1[i] : (uint32_t)rnd_2[i];
-
-                const uint32_t x_mod = reveal_share_u32_modp(x_share, plain_mod_u32, party, server_io);
-                const uint32_t y_mod = reveal_share_u32_modp(y_share, plain_mod_u32, party, server_io);
-
-                const int64_t x_signed = (x_mod >= half_mod_u32)
-                    ? ((int64_t)x_mod - (int64_t)plain_mod_u32)
-                    : (int64_t)x_mod;
-                const int64_t y_signed = (y_mod >= half_mod_u32)
-                    ? ((int64_t)y_mod - (int64_t)plain_mod_u32)
-                    : (int64_t)y_mod;
-
-                bucket_sum += (__int128)x_signed * (__int128)y_signed;
-            }
-            esti_sum[tt] = (int64_t)bucket_sum;
-        }
-
-        std::sort(esti_sum, esti_sum + get_config().mom_tt);
-        psi_ca = esti_sum[get_config().mom_tt / 2];
-        delete[] esti_sum;
-        delete cot;
+        cot->setup_recv();
     }
+
+    const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
+    OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
+
+    const size_t rounds = static_cast<size_t>(tot_rounds);
+    std::vector<uint32_t> local_terms(rounds, 0u);
+    std::vector<uint32_t> cross1_in(rounds, 0u), cross1_out(rounds, 0u);
+    std::vector<uint32_t> cross2_in(rounds, 0u), cross2_out(rounds, 0u);
+
+    for (size_t i = 0; i < rounds; ++i) {
+        const uint32_t xA = (party == ALICE) ? (uint32_t)rnd_2[i] : 0u;
+        const uint32_t yA = (party == ALICE) ? (uint32_t)rnd_1[i] : 0u;
+        const uint32_t xB = (party == BOB)   ? (uint32_t)rnd_1[i] : 0u;
+        const uint32_t yB = (party == BOB)   ? (uint32_t)rnd_2[i] : 0u;
+
+        local_terms[i] = (party == ALICE)
+            ? mul_mod_u32(xA, yA, plain_mod_u32)
+            : mul_mod_u32(xB, yB, plain_mod_u32);
+
+        cross1_in[i] = (party == ALICE) ? xA : yB;
+        cross2_in[i] = (party == ALICE) ? yA : xB;
+    }
+    ole.compute(cross1_out, cross1_in);
+    ole.compute(cross2_out, cross2_in);
+
+    int64_t *esti_sum = new int64_t[get_config().mom_tt];
+    for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+        uint32_t bucket_share = 0;
+        for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
+            uint32_t prod_share = local_terms[i];
+            prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+            prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+            bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+        }
+
+        // Reveal once per tt-bucket (small communication, limited leakage).
+        uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
+        esti_sum[tt] = (bucket_sum >= mod23_u32)
+            ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
+            : (int64_t)bucket_sum;
+    }
+
+    std::sort(esti_sum, esti_sum + get_config().mom_tt);
+    psi_ca = esti_sum[get_config().mom_tt / 2];
+    delete[] esti_sum;
+    delete cot;
 
     size_t mpc_comm = 0;
     if (party == 1) {
@@ -586,7 +587,12 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         std::cerr << "Total server time: " << total_time << "s" << std::endl;
     }
     
-    return psi_ca / get_config().mom_kk;
+    return restore_weight_scale_if_needed(
+        psi_ca,
+        get_config().mom_kk,
+        config.weighted_mode,
+        config.weight_scale_div
+    );
 }
 
 int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedInput>& input_set, emp::NetIO* io) {
@@ -640,6 +646,16 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     std::vector<Ciphertext> calc_prg(config.prg_dd);
     std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
     Plaintext weight_plain;
+    const uint64_t plain_modulus = parms.plain_modulus().value();
+    const uint64_t weight_scale_div = config.weight_scale_div;
+    if (config.weighted_mode && weight_scale_div > 1) {
+        const long double restore_scale =
+            static_cast<long double>(weight_scale_div) * static_cast<long double>(weight_scale_div);
+        std::cerr << "[Client" << config.party << "] weighted scaling enabled: divide-by "
+                  << weight_scale_div << " before encode, restore by x"
+                  << std::fixed << std::setprecision(0) << restore_scale
+                  << std::defaultfloat << " after recovery" << std::endl;
+    }
 
     for(const auto& item : input_set) {
         std::vector<int> ids = aes_gen.get_id_group(0, item.value);
@@ -665,13 +681,15 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
 
         if (item.weight != 1) {
             std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
-            ASSERT_MSG(item.weight > 0, "weight must be a positive integer");
-            uint64_t encoded_weight = static_cast<uint64_t>(item.weight);
+            const uint64_t encoded_weight = encode_weight_with_optional_scaling(
+                item.weight, weight_scale_div, plain_modulus);
             for (int round = 0; round < tot_rounds; ++round) {
                 weight_slots[round] = encoded_weight;
             }
             batch_encoder.encode(weight_slots, weight_plain);
-            evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+            if (encoded_weight != 1) {
+                evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+            }
         }
 
         // 多层乘法计算
