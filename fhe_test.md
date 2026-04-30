@@ -56,12 +56,12 @@ Exits 0 on pass, 1 on fail.
 # On server 1 host
 ./fhe_run_seed_tests.sh --mode wan --role server1 \
     --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
-    --generate-data --seed-bits "7 8 9 10"
+    --generate-data --seed-bits "7"
 
 # On server 2 host (same flags except --role)
 ./fhe_run_seed_tests.sh --mode wan --role server2 \
     --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
-    --generate-data --seed-bits "7 8 9 10"
+    --generate-data --seed-bits "7"
 ```
 **Default WAN throttle** (applied via [`throttle.py`](throttle.py) before the seed loop):
 

@@ -22,6 +22,10 @@ GENERATE_DATA=0
 THROTTLE_INTERFACE="auto"
 WAN_BANDWIDTH_MBIT="200"
 WAN_LATENCY_MS=40
+MAX_WEIGHT=0
+WEIGHT_SCALE_DIV=1
+WEIGHTED_MULTILIMB_EXACT=0
+WEIGHTED_LIMB_BITS=16
 
 FULL_LOG_FILE="${LOG_DIR}/wan_2pc_full_${ROLE:-unknown}_${TIMESTAMP}.log"
 ANALYSIS_LOG_FILE="${LOG_DIR}/wan_2pc_analysis_${ROLE:-unknown}_${TIMESTAMP}.log"
@@ -48,6 +52,10 @@ Options:
   --throttle-interface <name|auto>
   --wan-bandwidth-mbit <mbit>
   --wan-latency-ms <ms>
+  --max-weight <int>                Enable weighted mode when >0
+  --weight-scale-div <int>          Weighted mode scale divisor (>=1)
+  --weighted-multilimb-exact        Enable limb-decomposed OLE recovery path
+  --weighted-limb-bits <1..16>      Limb width (default 16)
   --help
 
 Notes:
@@ -110,6 +118,22 @@ while [[ $# -gt 0 ]]; do
             WAN_LATENCY_MS="$2"
             shift 2
             ;;
+        --max-weight)
+            MAX_WEIGHT="$2"
+            shift 2
+            ;;
+        --weight-scale-div)
+            WEIGHT_SCALE_DIV="$2"
+            shift 2
+            ;;
+        --weighted-multilimb-exact)
+            WEIGHTED_MULTILIMB_EXACT=1
+            shift
+            ;;
+        --weighted-limb-bits)
+            WEIGHTED_LIMB_BITS="$2"
+            shift 2
+            ;;
         --generate-data)
             GENERATE_DATA=1
             shift
@@ -129,6 +153,19 @@ done
 if [[ "${ROLE}" != "server1" && "${ROLE}" != "server2" ]]; then
     echo "--role server1|server2 is required" >&2
     usage
+    exit 1
+fi
+
+if ! [[ "${MAX_WEIGHT}" =~ ^[0-9]+$ ]]; then
+    echo "--max-weight must be a non-negative integer" >&2
+    exit 1
+fi
+if ! [[ "${WEIGHT_SCALE_DIV}" =~ ^[0-9]+$ ]] || [[ "${WEIGHT_SCALE_DIV}" -lt 1 ]]; then
+    echo "--weight-scale-div must be an integer >= 1" >&2
+    exit 1
+fi
+if ! [[ "${WEIGHTED_LIMB_BITS}" =~ ^[0-9]+$ ]] || [[ "${WEIGHTED_LIMB_BITS}" -lt 1 || "${WEIGHTED_LIMB_BITS}" -gt 16 ]]; then
+    echo "--weighted-limb-bits must be in [1,16]" >&2
     exit 1
 fi
 
@@ -232,6 +269,10 @@ log_both "Port: ${PORT}"
 log_both "Server 1 host: ${SERVER1_HOST}"
 log_both "Server 2 host: ${SERVER2_HOST}"
 log_both "Data dir: ${DATA_DIR}"
+log_both "Max weight: ${MAX_WEIGHT} ($( [[ "${MAX_WEIGHT}" -gt 0 ]] && echo weighted || echo unweighted ))"
+if [[ "${MAX_WEIGHT}" -gt 0 ]]; then
+    log_both "Weighted flags: --weighted_mode --weight_scale_div=${WEIGHT_SCALE_DIV}$( [[ "${WEIGHTED_MULTILIMB_EXACT}" -eq 1 ]] && echo " --weighted_multilimb_exact --weighted_limb_bits=${WEIGHTED_LIMB_BITS}" )"
+fi
 log_both "Logs:"
 log_both "  - Full log: ${FULL_LOG_FILE}"
 log_both "  - Analysis log: ${ANALYSIS_LOG_FILE}"
@@ -248,6 +289,11 @@ fi
 log_analysis "=========================================================="
 
 if [[ "${GENERATE_DATA}" -eq 1 ]]; then
+    if [[ "${MAX_WEIGHT}" -gt 0 ]]; then
+        log_both "Error: --generate-data in WAN mode is non-weighted in current gendata build."
+        log_both "Prepare weighted client files in ${DATA_DIR} first, then rerun without --generate-data."
+        exit 1
+    fi
     generate_wan_data
 fi
 
@@ -270,6 +316,14 @@ for seed_bits in "${SEED_BITS[@]}"; do
     log_both "--- [WAN ${ROLE}] Seed Size=2^${seed_bits} = ${seed_size} bits ---"
 
     cd "${REPO_DIR}"
+    weighted_flags=()
+    if [[ "${MAX_WEIGHT}" -gt 0 ]]; then
+        weighted_flags+=(--weighted_mode "--weight_scale_div=${WEIGHT_SCALE_DIV}")
+        if [[ "${WEIGHTED_MULTILIMB_EXACT}" -eq 1 ]]; then
+            weighted_flags+=(--weighted_multilimb_exact "--weighted_limb_bits=${WEIGHTED_LIMB_BITS}")
+        fi
+    fi
+
     ./bin/psi_server -p "${role_id}" \
         --port="${PORT}" \
         --psi_mode=fhe \
@@ -278,6 +332,7 @@ for seed_bits in "${SEED_BITS[@]}"; do
         --prg_dd="${PRG_DD}" \
         --server1_host="${SERVER1_HOST}" \
         --server2_host="${SERVER2_HOST}" \
+        "${weighted_flags[@]}" \
         > "${server_log}" 2>&1 &
     server_pid=$!
 
@@ -303,6 +358,7 @@ for seed_bits in "${SEED_BITS[@]}"; do
             --prg_dd="${PRG_DD}" \
             --server1_host="${SERVER1_HOST}" \
             --server2_host="${SERVER2_HOST}" \
+            "${weighted_flags[@]}" \
             > "${client_log}" 2>&1 &
         client_pids+=("$!")
     done
