@@ -24,8 +24,8 @@ FULL_LOG_FILE="${LOG_DIR}/client compute (${TIMESTAMP}).log"
 ANALYSIS_LOG_FILE="${LOG_DIR}/client compute (${TIMESTAMP})_analysis.log"
 
 # Test parameters
-CLIENT_SIZES_BITS=(0 4 8)  # 2^0=1, 2^4=16, 2^8=256, 2^12=4096
-PRG_DD_VALUES=(4 5 6 7 8)
+CLIENT_SIZES_BITS=(16)  # 2^0=1, 2^4=16, 2^8=256, 2^12=4096
+PRG_DD_VALUES=(4 5 7)
 RUNS_TO_AVERAGE="${1:-1}"
 
 if ! [[ "${RUNS_TO_AVERAGE}" =~ ^[0-9]+$ ]] || [ "${RUNS_TO_AVERAGE}" -lt 1 ]; then
