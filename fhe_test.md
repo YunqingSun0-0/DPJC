@@ -34,10 +34,40 @@ Python deps for the batch harness and plotting: `numpy`, `matplotlib`, `pandas`.
 ```bash
 python3 fhe_test_single.py 
 # define your own parameter
-python3 fhe_test_single.py --set_size_bit 10 --prg_dd 7  --seed_size_bit 8 --num_clients_per_server 1 --output_log fhe_test_10.log    
+python3 fhe_test_single.py --set_size_bit 1 --prg_dd 7  --seed_size_bit 8 --num_clients_per_server 1 --output_log fhe_test_small_unweighted.log -v  
+# add small weight
+## We currently use auto-weight-scale, result is scaled, but non accurate. To get more accurate result, need larger plain modulus or CRT multi-modulus. 
+python3 fhe_test_single.py --set_size_bit 1  --prg_dd 7  --seed_size_bit 8 --num_clients_per_server 1 --max_weight 8000000 --output_log fhe_test_small_weighted.log -v
 ```
 Exits 0 on pass, 1 on fail.
 
+### `Large-SEAL parameter` test
+
+
+Switch to `large-seal profile` (`16384 / 24 / {54, 54, 54, 54, 50, 18}`), rebuild, and run weighted overflow test:
+
+```bash
+perl -0777 -i -pe 's/size_t seal_degree = \d+;/size_t seal_degree = 16384;/; s/size_t seal_plain_modulus = \d+;/size_t seal_plain_modulus = 24;/; s/std::vector<int> seal_coeff_modulus = \{[^}]+\};/std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};/;' include/config.h && \
+cmake . && make -j"$(nproc)" && \
+python3 fhe_test_single.py \
+  --set_size_bit 10 \
+  --prg_dd 8 \
+  --seed_size_bit 8 \
+  --num_clients_per_server 1 \
+  --max_weight 8000000 \
+  --weighted_multilimb_exact \
+  --weighted_limb_bits=16 \
+  --output_log fhe_test_large_weighted_limb.log \
+  -v
+```
+
+
+Switch back to `default (current)` profile (`8192 / 24 / {60, 60, 36, 27, 27}`) and rebuild:
+
+```bash
+perl -0777 -i -pe 's/size_t seal_degree = \d+;/size_t seal_degree = 8192;/; s/size_t seal_plain_modulus = \d+;/size_t seal_plain_modulus = 24;/; s/std::vector<int> seal_coeff_modulus = \{[^}]+\};/std::vector<int> seal_coeff_modulus = {60, 60, 36, 27, 27};/;' include/config.h && \
+cmake . && make -j"$(nproc)"
+```
 
 ## Bash tests
 ### `fhe_run_seed_tests.sh`

@@ -178,6 +178,45 @@ inline int64_t restore_weight_scale_if_needed(
     return static_cast<int64_t>(value);
 }
 
+inline bool is_default_8192_seal_profile(const GlobalConfig& config) {
+    static const std::vector<int> kDefault8192Coeff = {60, 60, 36, 27, 27};
+    return config.seal_degree == 8192 &&
+           config.seal_plain_modulus == 24 &&
+           config.seal_coeff_modulus == kDefault8192Coeff;
+}
+
+inline Ciphertext mul_cipher_by_scalar_double_add(
+    const Ciphertext& input,
+    uint64_t scalar,
+    Evaluator& evaluator
+) {
+    ASSERT_MSG(scalar >= 1, "scalar must be >= 1 for double-add path");
+    if (scalar == 1) {
+        return input;
+    }
+
+    Ciphertext base = input;
+    Ciphertext acc;
+    bool acc_initialized = false;
+    uint64_t k = scalar;
+
+    while (k > 0) {
+        if (k & 1ULL) {
+            if (!acc_initialized) {
+                acc = base;
+                acc_initialized = true;
+            } else {
+                evaluator.add_inplace(acc, base);
+            }
+        }
+        k >>= 1;
+        if (k > 0) {
+            evaluator.add_inplace(base, base);
+        }
+    }
+    return acc;
+}
+
 Bit geq_unsigned(const Integer& a, const Integer& b);
 
 Integer mod_add(const Integer& a, const Integer& b, const Integer& p) {
@@ -774,6 +813,8 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     Plaintext weight_plain;
     const uint64_t plain_modulus = parms.plain_modulus().value();
     const uint64_t weight_scale_div = config.weight_scale_div;
+    const bool use_double_add_for_weight =
+        config.weighted_mode && is_default_8192_seal_profile(config);
     if (config.weighted_mode && weight_scale_div > 1) {
         const long double restore_scale =
             static_cast<long double>(weight_scale_div) * static_cast<long double>(weight_scale_div);
@@ -781,6 +822,10 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
                   << weight_scale_div << " before encode, restore by x"
                   << std::fixed << std::setprecision(0) << restore_scale
                   << std::defaultfloat << " after recovery" << std::endl;
+    }
+    if (use_double_add_for_weight) {
+        std::cerr << "[Client" << config.party << "] weighted scalar multiply path: "
+                  << "double-add (default 8192 profile)" << std::endl;
     }
 
     for(const auto& item : input_set) {
@@ -806,15 +851,19 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         }
 
         if (item.weight != 1) {
-            std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
             const uint64_t encoded_weight = encode_weight_with_optional_scaling(
                 item.weight, weight_scale_div, plain_modulus);
-            for (int round = 0; round < tot_rounds; ++round) {
-                weight_slots[round] = encoded_weight;
-            }
-            batch_encoder.encode(weight_slots, weight_plain);
             if (encoded_weight != 1) {
-                evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+                if (use_double_add_for_weight) {
+                    calc_prg[0] = mul_cipher_by_scalar_double_add(calc_prg[0], encoded_weight, evaluator);
+                } else {
+                    std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
+                    for (int round = 0; round < tot_rounds; ++round) {
+                        weight_slots[round] = encoded_weight;
+                    }
+                    batch_encoder.encode(weight_slots, weight_plain);
+                    evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+                }
             }
         }
 

@@ -11,6 +11,9 @@ if [ ! -f uci_words/docword.nytimes.txt ]; then
   gunzip uci_words/docword.nytimes.txt.gz
 fi
 
+# Optional long-running accuracy tests:
+# For quicker testing, you can set NUM_RUNS_PER_POINT = 100 in
+# accuracy_test_batch.py and accuracy_test_realworld.py.
 # python3 accuracy_test_realworld.py --parallel --set-size 262144
 # python3 accuracy_test_batch.py --param-mode seed_optimization --seed-optimization-parallel
 # python3 accuracy_test_batch.py --param-mode errorvsepsilon --errorvsepsilon-parallel

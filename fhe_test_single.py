@@ -14,6 +14,7 @@ import re
 import argparse
 import threading
 import math
+import csv
 from datetime import datetime
 
 # ==================== CONFIGURABLE PARAMETERS ====================
@@ -130,15 +131,79 @@ def _next_power_of_two(x: int) -> int:
         return 1
     return 1 << ((x - 1).bit_length())
 
-def auto_weight_scale_div(set_size: int, max_weight: int, plain_modulus_bit: int = 24, mom_k: int = 400) -> int:
+SCALE_VECTOR_BASE_WEIGHT = 8192
+# Keep helper assets under helper/.
+SCALE_VECTOR_RANDOM_CSV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "helper",
+    "scale_vector_random.csv",
+)
+# Fallback vector for max_weight=8192 under current random-mode estimator, indexed by set_size_bit in [1,24].
+FALLBACK_SCALE_VECTOR_BASE_BY_SET_SIZE_BIT = [
+    64, 64, 64, 128, 128, 256, 256, 512, 512, 1024, 1024, 2048,
+    2048, 4096, 4096, 8192, 8192, 16384, 16384, 32768, 32768, 65536, 65536, 131072,
+]
+
+def _load_scale_vector_base_from_csv(csv_path: str, base_weight: int):
     """
-    Auto-pick weight_scale_div from set size and max weight.
+    Load scale vector (set_size_bit 1..24) from helper CSV.
+    Expected columns: mode,set_size_bit,...,max_weight,recommended_weight_scale_div
+    """
+    if not os.path.exists(csv_path):
+        return None
+
+    scales_by_bit = {}
+    try:
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("mode") != "random":
+                    continue
+                try:
+                    max_weight = int(row.get("max_weight", "0"))
+                    set_size_bit = int(row.get("set_size_bit", "0"))
+                    scale = int(row.get("recommended_weight_scale_div", "0"))
+                except ValueError:
+                    continue
+                if max_weight != base_weight:
+                    continue
+                if set_size_bit < 1 or set_size_bit > 24 or scale < 1:
+                    continue
+
+                prev = scales_by_bit.get(set_size_bit)
+                scales_by_bit[set_size_bit] = scale if prev is None else max(prev, scale)
+    except OSError:
+        return None
+
+    if len(scales_by_bit) != 24:
+        return None
+    return [scales_by_bit[b] for b in range(1, 25)]
+
+
+SCALE_VECTOR_BASE_BY_SET_SIZE_BIT = _load_scale_vector_base_from_csv(
+    SCALE_VECTOR_RANDOM_CSV, SCALE_VECTOR_BASE_WEIGHT
+) or FALLBACK_SCALE_VECTOR_BASE_BY_SET_SIZE_BIT
+
+
+def auto_weight_scale_div_formula(
+    set_size: int,
+    max_weight: int,
+    plain_modulus_bit: int = 24,
+    mom_k: int = 400,
+    overlap_factor: float = 1.0,
+) -> int:
+    """
+    Formula-based estimator for weight_scale_div.
 
     Model (same random-weight mode as gendata):
       - intersection ~= set_size / 2
       - E[w] = (max_weight + 1) / 2
       - E[weighted_intersection_sum] ~= intersection * E[w]^2
       - one tt-bucket sums mom_k rounds, so expected bucket magnitude scales by mom_k
+
+    overlap_factor:
+      - 1.0 for current random-mode gendata assumption.
+      - >1.0 for conservative client-overlap assumptions.
 
     We pick scale so expected bucket stays around <= plain_modulus/2, then round up to power-of-two.
     """
@@ -152,11 +217,19 @@ def auto_weight_scale_div(set_size: int, max_weight: int, plain_modulus_bit: int
     # BFV batching modulus is a prime close to 2^plain_modulus_bit.
     plain_modulus_est = float((1 << plain_modulus_bit) - 1)
     intersection_est = float(max(1, set_size // 2))
+    overlap_factor = max(1.0, float(overlap_factor))
+    effective_intersection_est = intersection_est * overlap_factor
     mean_weight = (float(max_weight) + 1.0) / 2.0
-    expected_weighted_sum = intersection_est * mean_weight * mean_weight
+    expected_weighted_sum = effective_intersection_est * mean_weight * mean_weight
     expected_bucket_sum = expected_weighted_sum * float(mom_k)
 
     # Keep expected bucket around <= p/2 to limit wraparound in mod-p recovery.
+    # For tiny intersections, the product-of-weights variance is very high, so
+    # a pure mean-based estimate is often too optimistic. Add a small safety
+    # factor that decays with sqrt(intersection_est) and is neutral for
+    # moderate/large intersections.
+    tail_safety = max(1.0, 2.0 / math.sqrt(effective_intersection_est))
+    expected_bucket_sum *= tail_safety
     target_bucket = plain_modulus_est / 2.0
     required_from_bucket = math.sqrt(max(1.0, expected_bucket_sum / max(1.0, target_bucket)))
 
@@ -166,6 +239,65 @@ def auto_weight_scale_div(set_size: int, max_weight: int, plain_modulus_bit: int
     required = max(1.0, required_from_bucket, required_from_encoding)
     scale = _next_power_of_two(int(math.ceil(required)))
     return max(1, scale)
+
+
+def auto_weight_scale_div_vector(set_size_bit: int, max_weight: int) -> int:
+    """Vector estimator keyed by set_size_bit, scaled from base max_weight=8192."""
+    if max_weight <= 0:
+        return 1
+    if set_size_bit < 1:
+        set_size_bit = 1
+    if set_size_bit > len(SCALE_VECTOR_BASE_BY_SET_SIZE_BIT):
+        set_size_bit = len(SCALE_VECTOR_BASE_BY_SET_SIZE_BIT)
+    base_scale = SCALE_VECTOR_BASE_BY_SET_SIZE_BIT[set_size_bit - 1]
+    scaled = (base_scale * float(max_weight)) / float(SCALE_VECTOR_BASE_WEIGHT)
+    return max(1, _next_power_of_two(int(math.ceil(scaled))))
+
+
+def auto_weight_scale_div(
+    set_size_bit: int,
+    set_size: int,
+    max_weight: int,
+    num_clients_per_server: int,
+    plain_modulus_bit: int = 24,
+    mom_k: int = 400,
+    model: str = "vector_conservative",
+) -> int:
+    """
+    Unified auto estimator.
+
+    model:
+      - vector: set_size_bit vector + max_weight scaling.
+      - vector_conservative: vector baseline, then max(...) with conservative client-overlap formula.
+      - formula: pure formula with overlap_factor=1.0.
+    """
+    if max_weight <= 0:
+        return 1
+
+    if model == "vector":
+        return auto_weight_scale_div_vector(set_size_bit=set_size_bit, max_weight=max_weight)
+
+    if model == "vector_conservative":
+        vec_scale = auto_weight_scale_div_vector(set_size_bit=set_size_bit, max_weight=max_weight)
+        conservative_scale = auto_weight_scale_div_formula(
+            set_size=set_size,
+            max_weight=max_weight,
+            plain_modulus_bit=plain_modulus_bit,
+            mom_k=mom_k,
+            overlap_factor=float(max(1, num_clients_per_server)),
+        )
+        return max(vec_scale, conservative_scale)
+
+    if model == "formula":
+        return auto_weight_scale_div_formula(
+            set_size=set_size,
+            max_weight=max_weight,
+            plain_modulus_bit=plain_modulus_bit,
+            mom_k=mom_k,
+            overlap_factor=1.0,
+        )
+
+    raise ValueError(f"Unknown auto weight scale model: {model}")
 
 def read_gendata_config(config_path):
     """Read key=value pairs from gendata config.txt"""
@@ -545,6 +677,12 @@ def main():
                        help='Weighted mode only: encode each weight as round(weight / weight_scale_div), '
                             'then server restores estimate by multiplying back weight_scale_div^2. '
                             'Default 0 = auto-pick from set_size_bit and max_weight; >0 = manual override.')
+    parser.add_argument('--weight_scale_auto_model', type=str, default="vector_conservative",
+                       choices=["vector", "vector_conservative", "formula"],
+                       help='Auto mode only (--weight_scale_div=0): '
+                            '"vector"=scale vector lookup; '
+                            '"vector_conservative"=vector + client-overlap safety; '
+                            '"formula"=legacy formula.')
     parser.add_argument('--weighted_multilimb_exact', action='store_true',
                        help='Weighted mode only: use limb-decomposed OLE recovery path in 2PC '
                             '(no per-round residue reveal; still modulo plain_modulus).')
@@ -565,10 +703,13 @@ def main():
     MAX_WEIGHT = args.max_weight
     if args.weight_scale_div == 0 and MAX_WEIGHT > 0:
         WEIGHT_SCALE_DIV = auto_weight_scale_div(
+            set_size_bit=args.set_size_bit,
             set_size=SET_SIZE,
             max_weight=MAX_WEIGHT,
+            num_clients_per_server=NUM_CLIENTS_PER_SERVER,
             plain_modulus_bit=SEAL_PLAIN_MODULUS_BIT,
-            mom_k=MOM_K
+            mom_k=MOM_K,
+            model=args.weight_scale_auto_model,
         )
     elif args.weight_scale_div == 0:
         WEIGHT_SCALE_DIV = 1
@@ -604,7 +745,8 @@ def main():
         if args.weight_scale_div == 0:
             log(
                 f"Weight scale mode: auto (set_size={SET_SIZE}, max_weight={MAX_WEIGHT}, "
-                f"plain_modulus_bit={SEAL_PLAIN_MODULUS_BIT}, mom_k={MOM_K})"
+                f"plain_modulus_bit={SEAL_PLAIN_MODULUS_BIT}, mom_k={MOM_K}, "
+                f"model={args.weight_scale_auto_model}, clients_per_server={NUM_CLIENTS_PER_SERVER})"
             )
         if WEIGHTED_MULTILIMB_EXACT:
             log(

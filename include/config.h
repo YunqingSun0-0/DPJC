@@ -26,23 +26,13 @@ struct GlobalConfig {
     bool weighted_multilimb_exact = false; // weighted recovery via limb-decomposed OLE path (no per-round residue reveal)
     int weighted_limb_bits = 16; // limb width for weighted_multilimb_exact OLE decomposition path
 
-    size_t seal_degree = 16384;
+    size_t seal_degree = 8192;
     size_t seal_plain_modulus = 24;
-    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18}; // for large plain modulus
-    /*python3 fhe_test_single.py \
-  --set_size_bit 8 \
-  --seed_size_bit 8 \
-  --prg_dd 8 \
-  --num_clients_per_server 1 \
-  --max_weight 4294967296 \
-  --output_log fhe_test_weight.log \
-  -v
-    input_size; seal_plain_modulus; coeff_modulus; noise budget
-    10; 20; 188 = { 52, 52, 36, 24, 24 }; {188, 136, 111, 76, 44, 12, 7}
-    10; 24; 284 = { 54, 54, 54, 54, 50, 18 }; // tuned down from 438 to target ~20 noise-before-sharing
-    10; 28;
-    {54, 54, 54, 54, 50, 18}; // for deal modulus = 24
-    {60, 60, 60, 60, 60, 60, 60, 18}; // for large plain modulus
+    std::vector<int> seal_coeff_modulus = {60, 60, 36, 27, 27};
+    /*
+    210 = { 60, 60, 36, 27, 27 }; // for default seal modulus = 24/8192
+    {60, 60, 36, 27, 27}; // for default seal modulus = 24/16384
+    {60, 60, 60, 60, 60, 60, 60, 18}; // for large plain modulus up to 58/16384
     */
     
     int num_clients_per_server = 1;
