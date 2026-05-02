@@ -87,12 +87,12 @@ cmake . && make -j"$(nproc)"
 ```bash
 # On server 1 host
 ./fhe_run_seed_tests.sh --mode wan --role server1 \
-    --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
+    --server1-host 127.0.0.1 --server2-host 127.0.0.1 \
     --generate-data --seed-bits "7"
 
 # On server 2 host (same flags except --role)
 ./fhe_run_seed_tests.sh --mode wan --role server2 \
-    --server1-host 172.31.44.143 --server2-host 172.31.72.125 \
+    --server1-host 127.0.0.1 --server2-host 127.0.0.1 \
     --generate-data --seed-bits "7"
 ```
 **Default WAN throttle** (applied via [`throttle.py`](throttle.py) before the seed loop):
