@@ -27,9 +27,9 @@ struct GlobalConfig {
     int weighted_limb_bits = 16; // limb width for weighted_multilimb_exact OLE decomposition path
     int weighted_chunk_k = 0; // weighted mode only: split each tt bucket into chunks of this size (0 = disabled)
 
-    size_t seal_degree = 16384;
+    size_t seal_degree = 8192;
     size_t seal_plain_modulus = 24;
-    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};
+    std::vector<int> seal_coeff_modulus = {60, 60, 36, 27, 27};
     /*
     210 = { 60, 60, 36, 27, 27 }; // for default seal modulus = 24/8192
     {60, 60, 36, 27, 27}; // for default seal modulus = 24/16384

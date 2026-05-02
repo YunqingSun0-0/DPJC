@@ -65,7 +65,7 @@ Sweeps PRG seed depth `d ∈ {5, 6, 7, 8, 9}` at a fixed sketch budget `k×t = 4
 python3 accuracy_test_batch.py --param-mode seed_optimization
 #parallel
 python3 accuracy_test_batch.py --param-mode seed_optimization --seed-optimization-parallel
-# finish an unfinished run
+# finish an unfinished run (run this on an existing experiment dir)
 python3 accuracy_test_batch.py --param-mode seed_optimization --seed-optimization-parallel --run-dir experiments/run_xxx 
 ```
 
@@ -86,5 +86,5 @@ Output: `experiments/run_<timestamp>/plots/errorvsepsilon_*.png|pdf` and `result
 ### Notes
 
 - Both modes are resumable: rerun with the same `--run-dir` and completed `(d, k, seed, mode)` combinations are skipped.
-- `mom_k * mom_t` must stay ≤ `seal_degree` (default: 16384).
+- `mom_k * mom_t` must stay ≤ `seal_degree` (default: 8192/16384).
 - The script runs `pkill -f psi_server / psi_client` on startup; close any other PSI jobs first.

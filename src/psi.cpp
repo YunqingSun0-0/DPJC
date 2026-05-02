@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <limits>
+#include <utility>
 #include "oleu32.h"
 using namespace seal;
 using namespace emp;
@@ -172,6 +173,15 @@ inline bool is_default_8192_seal_profile(const GlobalConfig& config) {
            config.seal_coeff_modulus == kDefault8192Coeff;
 }
 
+inline int bit_length_u64(uint64_t x) {
+    int bits = 0;
+    do {
+        ++bits;
+        x >>= 1;
+    } while (x != 0ULL);
+    return bits;
+}
+
 inline Ciphertext mul_cipher_by_scalar_double_add(
     const Ciphertext& input,
     uint64_t scalar,
@@ -205,6 +215,8 @@ inline Ciphertext mul_cipher_by_scalar_double_add(
 }
 
 Bit geq_unsigned(const Integer& a, const Integer& b);
+Bit geq_const_unsigned(const Integer& a, uint64_t c);
+std::pair<Bit, Bit> geq_dual_const_unsigned(const Integer& a, uint64_t low_c, uint64_t high_c);
 
 Integer mod_add(const Integer& a, const Integer& b, const Integer& p) {
     // Do unsigned modular addition in widened domain to avoid signed overflow.
@@ -254,6 +266,56 @@ Bit geq_unsigned(const Integer& a, const Integer& b) {
     a_wide.resize(wide_len, false);
     b_wide.resize(wide_len, false);
     return a_wide >= b_wide;
+}
+
+Bit geq_const_unsigned(const Integer& a, uint64_t c) {
+    const size_t n = a.size();
+    ASSERT_MSG(n > 0 && n <= 63, "geq_const_unsigned supports 1..63 bits");
+    ASSERT_MSG((c >> n) == 0ULL, "constant does not fit comparator bit-width");
+
+    Bit gt(false, PUBLIC), eq(true, PUBLIC);
+    for (int i = (int)n - 1; i >= 0; --i) {
+        const Bit xi = a[(size_t)i];
+        const Bit not_xi = !xi;
+        if (((c >> i) & 1ULL) != 0ULL) {
+            eq = eq & xi;
+        } else {
+            gt = gt | (eq & xi);
+            eq = eq & not_xi;
+        }
+    }
+    return gt | eq;
+}
+
+std::pair<Bit, Bit> geq_dual_const_unsigned(const Integer& a, uint64_t low_c, uint64_t high_c) {
+    const size_t n = a.size();
+    ASSERT_MSG(n > 0 && n <= 63, "geq_dual_const_unsigned supports 1..63 bits");
+    ASSERT_MSG((low_c >> n) == 0ULL, "low_c does not fit comparator bit-width");
+    ASSERT_MSG((high_c >> n) == 0ULL, "high_c does not fit comparator bit-width");
+
+    Bit gt_low(false, PUBLIC), eq_low(true, PUBLIC);
+    Bit gt_high(false, PUBLIC), eq_high(true, PUBLIC);
+
+    for (int i = (int)n - 1; i >= 0; --i) {
+        const Bit xi = a[(size_t)i];
+        const Bit not_xi = !xi;
+
+        if (((low_c >> i) & 1ULL) != 0ULL) {
+            eq_low = eq_low & xi;
+        } else {
+            gt_low = gt_low | (eq_low & xi);
+            eq_low = eq_low & not_xi;
+        }
+
+        if (((high_c >> i) & 1ULL) != 0ULL) {
+            eq_high = eq_high & xi;
+        } else {
+            gt_high = gt_high | (eq_high & xi);
+            eq_high = eq_high & not_xi;
+        }
+    }
+
+    return {gt_low | eq_low, gt_high | eq_high};
 }
 
 int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
@@ -455,7 +517,14 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
 
     if(!get_config().test_mode) {
         Decryptor decryptor_noise_budget(context, sk_noise_budget);
-        std::cerr << "noise budget - before sharing: " << decryptor_noise_budget.invariant_noise_budget(combined_result) << std::endl;
+        const int noise_before_sharing =
+            decryptor_noise_budget.invariant_noise_budget(combined_result);
+        std::cerr << "noise budget - before sharing: " << noise_before_sharing << std::endl;
+        if (config.weighted_mode && noise_before_sharing <= 0) {
+            throw std::runtime_error(
+                "noise budget exhausted before sharing in weighted mode; "
+                "increase --seal_plain_modulus or reduce max_weight/round complexity");
+        }
     }
     
     Ciphertext esti_cipher_1, esti_cipher_2;
@@ -545,22 +614,221 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     const uint32_t plain_mod_u32 = static_cast<uint32_t>(plain_mod_u64);
 
     int64_t psi_ca = 0;
+    size_t phase_ole_comm = 0;
+    size_t phase_recovery_comm = 0; // excludes private sort phase
+    size_t phase_sort_comm = 0;
     const bool use_weighted_multilimb_exact =
         (config.weighted_mode && config.weighted_multilimb_exact);
+    // Option A: weighted recovery is done fully in 2PC and only the final result is revealed.
+    const bool use_private_weighted_recovery = config.weighted_mode;
     const bool use_weighted_chunk_split =
-        (config.weighted_mode && config.weighted_chunk_k > 0 && config.weighted_chunk_k < config.mom_kk);
+        (!use_private_weighted_recovery) &&
+        (config.weighted_chunk_k > 0 && config.weighted_chunk_k < config.mom_kk);
     const int weighted_chunk_k_effective = use_weighted_chunk_split ? config.weighted_chunk_k : config.mom_kk;
+    const int private_weighted_chunk_k_effective =
+        (use_private_weighted_recovery &&
+         config.weighted_chunk_k > 0 && config.weighted_chunk_k < config.mom_kk)
+            ? config.weighted_chunk_k
+            : config.mom_kk;
+    const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
+
     if (party == 1 && use_weighted_multilimb_exact) {
         std::cerr << "[Server1] weighted_multilimb_exact enabled: "
-                  << "limb-decomposed OLE recovery (no per-round residue reveal)." << std::endl;
+                  << "limb-decomposed OLE recovery path." << std::endl;
     }
-    if (party == 1 && use_weighted_chunk_split) {
+    if (party == 1 && use_private_weighted_recovery) {
+        std::cerr << "[Server1] weighted private recovery enabled: "
+                  << "per-round private centered-decode + private median (reveal final only)." << std::endl;
+        if (private_weighted_chunk_k_effective > 1) {
+            std::cerr << "[Server1] private chunk decode enabled: chunk_k="
+                      << private_weighted_chunk_k_effective << " (no chunk reveal)." << std::endl;
+        }
+    } else if (party == 1 && use_weighted_chunk_split) {
         std::cerr << "[Server1] weighted_chunk_k enabled: split each tt bucket into chunks of "
                   << weighted_chunk_k_effective << " rounds for recovery aggregation." << std::endl;
     }
 
-    int64_t *esti_sum = new int64_t[get_config().mom_tt];
+    auto recover_public_bucket_median = [&](const std::vector<uint32_t>& prod_shares) -> int64_t {
+        int64_t *esti_sum = new int64_t[get_config().mom_tt];
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            int64_t bucket_sum_signed = 0;
+            for (int kk = 0; kk < get_config().mom_kk;) {
+                const int chunk = std::min(weighted_chunk_k_effective, get_config().mom_kk - kk);
+                uint32_t chunk_share = 0;
+                for (int local = 0; local < chunk; ++local, ++kk, ++i) {
+                    chunk_share = add_mod_u32(chunk_share, prod_shares[(size_t)i], plain_mod_u32);
+                }
+                const uint32_t chunk_sum_modp = reveal_share_u32_modp(chunk_share, plain_mod_u32, party, server_io);
+                bucket_sum_signed += decode_centered_modp_u32(chunk_sum_modp, plain_mod_u32, mod23_u32);
+            }
+            esti_sum[tt] = bucket_sum_signed;
+        }
+        std::sort(esti_sum, esti_sum + get_config().mom_tt);
+        const int64_t median = esti_sum[get_config().mom_tt / 2];
+        delete[] esti_sum;
+        return median;
+    };
+
+    auto recover_private_weighted_median = [&](const std::vector<uint32_t>& prod_shares) -> int64_t {
+        size_t recovery_begin = 0;
+        if (party == 1) {
+            recovery_begin = server_io->counter;
+        }
+        setup_semi_honest(server_io, party);
+        const int share_bits = ole_bit_length;
+        const int chunk_k = private_weighted_chunk_k_effective;
+        if (chunk_k > 1) {
+            const int chunks_per_bucket =
+                (get_config().mom_kk + chunk_k - 1) / chunk_k;
+            const uint64_t bucket_abs_bound =
+                static_cast<uint64_t>(chunks_per_bucket) * static_cast<uint64_t>(plain_mod_u32);
+            const int acc_bits = std::max(32, bit_length_u64(std::max<uint64_t>(1ULL, bucket_abs_bound)) + 2);
+
+            Integer modp(share_bits, plain_mod_u32, PUBLIC);
+
+            std::vector<Integer> esti_sum_secret;
+            esti_sum_secret.reserve((size_t)get_config().mom_tt);
+
+            for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+                Integer bucket_sum(acc_bits, 0, PUBLIC);
+                for (int kk = 0; kk < get_config().mom_kk;) {
+                    const int chunk = std::min(chunk_k, get_config().mom_kk - kk);
+                    uint32_t local_chunk_share = 0;
+                    for (int local = 0; local < chunk; ++local, ++kk, ++i) {
+                        local_chunk_share = add_mod_u32(
+                            local_chunk_share, prod_shares[(size_t)i], plain_mod_u32);
+                    }
+
+                    Integer share_a(share_bits, (party == ALICE) ? (uint64_t)local_chunk_share : 0ULL, ALICE);
+                    Integer share_b(share_bits, (party == BOB) ? (uint64_t)local_chunk_share : 0ULL, BOB);
+
+                    Integer chunk_modp = mod_add(share_a, share_b, modp);
+                    Bit neg = geq_const_unsigned(chunk_modp, mod23_u32);
+                    Integer chunk_signed = If(neg, chunk_modp - modp, chunk_modp);
+                    chunk_signed.resize(acc_bits, true);
+                    bucket_sum = bucket_sum + chunk_signed;
+                }
+
+                esti_sum_secret.push_back(bucket_sum);
+            }
+
+            size_t sort_begin = 0, sort_end = 0;
+            if (party == 1) {
+                sort_begin = server_io->counter;
+            }
+            sort(esti_sum_secret.data(), get_config().mom_tt);
+            if (party == 1) {
+                sort_end = server_io->counter;
+                phase_sort_comm = sort_end - sort_begin;
+            }
+            Integer median_secret = esti_sum_secret[get_config().mom_tt / 2];
+            median_secret.resize(64, true);
+            const int64_t median = median_secret.reveal<int64_t>(PUBLIC);
+            finalize_semi_honest();
+            if (party == 1) {
+                const size_t recovery_end = server_io->counter;
+                const size_t recovery_total = recovery_end - recovery_begin;
+                phase_recovery_comm = (recovery_total >= phase_sort_comm)
+                    ? (recovery_total - phase_sort_comm)
+                    : 0;
+            }
+            return median;
+        }
+
+        // chunk_k == 1: keep the more communication-efficient per-round correction circuit.
+        const int pair_sum_bits = share_bits + 1; // a+b where each share is in [0, p)
+        const uint64_t corr_max = static_cast<uint64_t>(2) * static_cast<uint64_t>(get_config().mom_kk);
+        const int corr_count_bits = bit_length_u64(std::max<uint64_t>(1ULL, corr_max));
+        const uint64_t raw_sum_max =
+            static_cast<uint64_t>(2) * static_cast<uint64_t>(get_config().mom_kk) *
+            static_cast<uint64_t>(std::max<uint32_t>(1u, plain_mod_u32 - 1u));
+        const uint64_t corr_term_max = corr_max * static_cast<uint64_t>(plain_mod_u32);
+        const uint64_t bucket_abs_bound = raw_sum_max + corr_term_max;
+        const int acc_bits = std::max(32, bit_length_u64(std::max<uint64_t>(1ULL, bucket_abs_bound)) + 2);
+
+        const uint64_t threshold_low_u64 = static_cast<uint64_t>(mod23_u32);
+        const uint64_t threshold_high_u64 = static_cast<uint64_t>(plain_mod_u32) + threshold_low_u64;
+        ASSERT_MSG(threshold_high_u64 < (1ULL << pair_sum_bits),
+                   "pair_sum_bits is too small for weighted decode thresholds");
+        ASSERT_MSG(pair_sum_bits <= 63, "pair_sum_bits must be <= 63");
+        Integer threshold_low(pair_sum_bits, threshold_low_u64, PUBLIC);
+        Integer threshold_high(pair_sum_bits, threshold_high_u64, PUBLIC);
+
+        Integer p_acc(acc_bits, static_cast<int64_t>(plain_mod_u32), PUBLIC);
+        const int corr_block_size = 32;
+        const int corr_block_bits = bit_length_u64((uint64_t)(2 * corr_block_size));
+
+        std::vector<Integer> esti_sum_secret;
+        esti_sum_secret.reserve((size_t)get_config().mom_tt);
+
+        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
+            uint64_t local_share_sum = 0;
+            Integer corr_count(corr_count_bits, 0, PUBLIC);
+            for (int kk = 0; kk < get_config().mom_kk;) {
+                Integer corr_block(corr_block_bits, 0, PUBLIC);
+                for (int b = 0; b < corr_block_size && kk < get_config().mom_kk; ++b, ++kk, ++i) {
+                    const uint32_t share_local = prod_shares[(size_t)i];
+                    local_share_sum += static_cast<uint64_t>(share_local);
+
+                    Integer share_a(pair_sum_bits, (party == ALICE) ? (uint64_t)share_local : 0ULL, ALICE);
+                    Integer share_b(pair_sum_bits, (party == BOB) ? (uint64_t)share_local : 0ULL, BOB);
+                    Integer pair_sum = share_a + share_b; // in [0, 2p)
+
+                    const Bit ge_low = geq_unsigned(pair_sum, threshold_low);
+                    const Bit ge_high = geq_unsigned(pair_sum, threshold_high);
+
+                    Integer corr_inc(2, 0, PUBLIC);
+                    corr_inc[0] = ge_low ^ ge_high; // low bit of 0/1/2
+                    corr_inc[1] = ge_high;          // high bit of 0/1/2
+                    corr_inc.resize(corr_block_bits, false);
+                    corr_block = corr_block + corr_inc;
+                }
+
+                Integer corr_block_wide = corr_block;
+                corr_block_wide.resize(corr_count_bits, false);
+                corr_count = corr_count + corr_block_wide;
+            }
+
+            Integer sum_a(acc_bits, (party == ALICE) ? local_share_sum : 0ULL, ALICE);
+            Integer sum_b(acc_bits, (party == BOB) ? local_share_sum : 0ULL, BOB);
+            Integer bucket_sum = sum_a + sum_b;
+
+            Integer corr_count_acc = corr_count;
+            corr_count_acc.resize(acc_bits, false);
+            Integer correction = corr_count_acc * p_acc;
+            bucket_sum = bucket_sum - correction;
+
+            esti_sum_secret.push_back(bucket_sum);
+        }
+
+        size_t sort_begin = 0, sort_end = 0;
+        if (party == 1) {
+            sort_begin = server_io->counter;
+        }
+        sort(esti_sum_secret.data(), get_config().mom_tt);
+        if (party == 1) {
+            sort_end = server_io->counter;
+            phase_sort_comm = sort_end - sort_begin;
+        }
+        Integer median_secret = esti_sum_secret[get_config().mom_tt / 2];
+        median_secret.resize(64, true);
+        const int64_t median = median_secret.reveal<int64_t>(PUBLIC);
+        finalize_semi_honest();
+        if (party == 1) {
+            const size_t recovery_end = server_io->counter;
+            const size_t recovery_total = recovery_end - recovery_begin;
+            phase_recovery_comm = (recovery_total >= phase_sort_comm)
+                ? (recovery_total - phase_sort_comm)
+                : 0;
+        }
+        return median;
+    };
+
     if (use_weighted_multilimb_exact) {
+        size_t ole_begin = 0;
+        if (party == 1) {
+            ole_begin = server_io->counter;
+        }
         IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
         const bool ole_sender_role = (party == BOB);
         if (party == BOB) {
@@ -569,7 +837,6 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
             cot->setup_recv();
         }
 
-        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
         OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
 
         const int limb_bits = config.weighted_limb_bits;
@@ -632,40 +899,42 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         ole.compute(out_yx_10, in_yx_10);
         ole.compute(out_yx_11, in_yx_11);
 
-        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            int64_t bucket_sum_signed = 0;
-            for (int kk = 0; kk < get_config().mom_kk;) {
-                const int chunk = std::min(weighted_chunk_k_effective, get_config().mom_kk - kk);
-                uint32_t chunk_share = 0;
-                for (int local = 0; local < chunk; ++local, ++kk, ++i) {
-                    uint32_t prod_share = local_terms[i];
+        std::vector<uint32_t> prod_shares(rounds, 0u);
+        for (size_t i = 0; i < rounds; ++i) {
+            uint32_t prod_share = local_terms[i];
 
-                    uint32_t cross_xy = out_xy_00[i];
-                    uint32_t cross_xy_01_10 = add_mod_u32(out_xy_01[i], out_xy_10[i], plain_mod_u32);
-                    cross_xy_01_10 = mul_mod_u32(cross_xy_01_10, shift_limb_mod, plain_mod_u32);
-                    uint32_t cross_xy_11 = mul_mod_u32(out_xy_11[i], shift_2limb_mod, plain_mod_u32);
-                    cross_xy = add_mod_u32(cross_xy, cross_xy_01_10, plain_mod_u32);
-                    cross_xy = add_mod_u32(cross_xy, cross_xy_11, plain_mod_u32);
+            uint32_t cross_xy = out_xy_00[i];
+            uint32_t cross_xy_01_10 = add_mod_u32(out_xy_01[i], out_xy_10[i], plain_mod_u32);
+            cross_xy_01_10 = mul_mod_u32(cross_xy_01_10, shift_limb_mod, plain_mod_u32);
+            uint32_t cross_xy_11 = mul_mod_u32(out_xy_11[i], shift_2limb_mod, plain_mod_u32);
+            cross_xy = add_mod_u32(cross_xy, cross_xy_01_10, plain_mod_u32);
+            cross_xy = add_mod_u32(cross_xy, cross_xy_11, plain_mod_u32);
 
-                    uint32_t cross_yx = out_yx_00[i];
-                    uint32_t cross_yx_01_10 = add_mod_u32(out_yx_01[i], out_yx_10[i], plain_mod_u32);
-                    cross_yx_01_10 = mul_mod_u32(cross_yx_01_10, shift_limb_mod, plain_mod_u32);
-                    uint32_t cross_yx_11 = mul_mod_u32(out_yx_11[i], shift_2limb_mod, plain_mod_u32);
-                    cross_yx = add_mod_u32(cross_yx, cross_yx_01_10, plain_mod_u32);
-                    cross_yx = add_mod_u32(cross_yx, cross_yx_11, plain_mod_u32);
+            uint32_t cross_yx = out_yx_00[i];
+            uint32_t cross_yx_01_10 = add_mod_u32(out_yx_01[i], out_yx_10[i], plain_mod_u32);
+            cross_yx_01_10 = mul_mod_u32(cross_yx_01_10, shift_limb_mod, plain_mod_u32);
+            uint32_t cross_yx_11 = mul_mod_u32(out_yx_11[i], shift_2limb_mod, plain_mod_u32);
+            cross_yx = add_mod_u32(cross_yx, cross_yx_01_10, plain_mod_u32);
+            cross_yx = add_mod_u32(cross_yx, cross_yx_11, plain_mod_u32);
 
-                    prod_share = add_mod_u32(prod_share, cross_xy, plain_mod_u32);
-                    prod_share = add_mod_u32(prod_share, cross_yx, plain_mod_u32);
-                    chunk_share = add_mod_u32(chunk_share, prod_share, plain_mod_u32);
-                }
-
-                const uint32_t chunk_sum_modp = reveal_share_u32_modp(chunk_share, plain_mod_u32, party, server_io);
-                bucket_sum_signed += decode_centered_modp_u32(chunk_sum_modp, plain_mod_u32, mod23_u32);
-            }
-            esti_sum[tt] = bucket_sum_signed;
+            prod_share = add_mod_u32(prod_share, cross_xy, plain_mod_u32);
+            prod_share = add_mod_u32(prod_share, cross_yx, plain_mod_u32);
+            prod_shares[i] = prod_share;
         }
+        if (party == 1) {
+            const size_t ole_end = server_io->counter;
+            phase_ole_comm = ole_end - ole_begin;
+        }
+
+        psi_ca = use_private_weighted_recovery
+            ? recover_private_weighted_median(prod_shares)
+            : recover_public_bucket_median(prod_shares);
         delete cot;
     } else {
+        size_t ole_begin = 0;
+        if (party == 1) {
+            ole_begin = server_io->counter;
+        }
         IKNP <NetIO> *cot = new IKNP <NetIO> (server_io, true);
         const bool ole_sender_role = (party == BOB);
         if (party == BOB) {
@@ -674,7 +943,6 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
             cot->setup_recv();
         }
 
-        const uint32_t mod23_u32 = (uint32_t)(((uint64_t)plain_mod_u32 * 2) / 3);
         OLE_U32_MODP<emp::NetIO> ole(server_io, cot, plain_mod_u32, ole_bit_length, ole_sender_role);
 
         const size_t rounds = static_cast<size_t>(tot_rounds);
@@ -698,30 +966,23 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         ole.compute(cross1_out, cross1_in);
         ole.compute(cross2_out, cross2_in);
 
-        for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            int64_t bucket_sum_signed = 0;
-            for (int kk = 0; kk < get_config().mom_kk;) {
-                const int chunk = std::min(weighted_chunk_k_effective, get_config().mom_kk - kk);
-                uint32_t chunk_share = 0;
-                for (int local = 0; local < chunk; ++local, ++kk, ++i) {
-                    uint32_t prod_share = local_terms[i];
-                    prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
-                    prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
-                    chunk_share = add_mod_u32(chunk_share, prod_share, plain_mod_u32);
-                }
-
-                // Reveal each chunk in weighted chunk mode; legacy path remains one reveal per bucket.
-                const uint32_t chunk_sum_modp = reveal_share_u32_modp(chunk_share, plain_mod_u32, party, server_io);
-                bucket_sum_signed += decode_centered_modp_u32(chunk_sum_modp, plain_mod_u32, mod23_u32);
-            }
-            esti_sum[tt] = bucket_sum_signed;
+        std::vector<uint32_t> prod_shares(rounds, 0u);
+        for (size_t i = 0; i < rounds; ++i) {
+            uint32_t prod_share = local_terms[i];
+            prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+            prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+            prod_shares[i] = prod_share;
         }
+        if (party == 1) {
+            const size_t ole_end = server_io->counter;
+            phase_ole_comm = ole_end - ole_begin;
+        }
+
+        psi_ca = use_private_weighted_recovery
+            ? recover_private_weighted_median(prod_shares)
+            : recover_public_bucket_median(prod_shares);
         delete cot;
     }
-
-    std::sort(esti_sum, esti_sum + get_config().mom_tt);
-    psi_ca = esti_sum[get_config().mom_tt / 2];
-    delete[] esti_sum;
 
     size_t mpc_comm = 0;
     if (party == 1) {
@@ -729,6 +990,21 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         mpc_comm = io_bytes_after - io_bytes_before;
         std::cerr << "2PC communication: " << mpc_comm << " bytes ("
                 << (mpc_comm / (1024.0 * 1024.0)) << " MB)" << std::endl;
+        if (use_private_weighted_recovery) {
+            const size_t tracked = phase_ole_comm + phase_recovery_comm + phase_sort_comm;
+            const size_t other_comm = (mpc_comm >= tracked) ? (mpc_comm - tracked) : 0;
+            std::cerr << "2PC breakdown (bytes): "
+                      << "ole=" << phase_ole_comm
+                      << ", recovery_no_sort=" << phase_recovery_comm
+                      << ", sort=" << phase_sort_comm
+                      << ", other=" << other_comm << std::endl;
+            std::cerr << "2PC breakdown (MB): "
+                      << "ole=" << (phase_ole_comm / (1024.0 * 1024.0))
+                      << ", recovery_no_sort=" << (phase_recovery_comm / (1024.0 * 1024.0))
+                      << ", sort=" << (phase_sort_comm / (1024.0 * 1024.0))
+                      << ", other=" << (other_comm / (1024.0 * 1024.0))
+                      << std::endl;
+        }
     }
     
     // 计算服务器恢复时间 = 客户端结果聚合 + 2PC

@@ -14,7 +14,6 @@ import re
 import argparse
 import threading
 import math
-import csv
 from datetime import datetime
 
 # ==================== CONFIGURABLE PARAMETERS ====================
@@ -24,14 +23,14 @@ SET_SIZE = None  # Will be set by command-line argument or default
 LOG_FILE = None  # Will be set based on set size
 INTERSECTION_SIZE = None  # Will be set by command-line argument or default
 MAX_WEIGHT = 0  # 0 = no weights (default); >0 = uniform random weights in [1, MAX_WEIGHT]
-WEIGHT_SCALE_DIV = 1  # deprecated: weight scaling is disabled, kept for CLI compatibility
 WEIGHTED_MULTILIMB_EXACT = False  # weighted mode only: limb-decomposed OLE path (no per-round residue reveal)
 WEIGHTED_LIMB_BITS = 16
 WEIGHTED_CHUNK_K = 0  # weighted mode only: split each tt bucket into chunks in server recovery (0 = disabled)
 NUM_CLIENTS_PER_SERVER = 1
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
-SEAL_PLAIN_MODULUS_BIT = 24
+DEFAULT_SEAL_PLAIN_MODULUS_BIT = 24
+SEAL_PLAIN_MODULUS_BIT = DEFAULT_SEAL_PLAIN_MODULUS_BIT
 MOM_K = 400
 
 # Test parameters
@@ -131,12 +130,6 @@ def wait_for_processes(processes, timeout=120):
         time.sleep(0.1)
     return False
 
-def _next_power_of_two(x: int) -> int:
-    """Return the smallest power of two >= x (x>=1)."""
-    if x <= 1:
-        return 1
-    return 1 << ((x - 1).bit_length())
-
 
 def estimate_plain_modulus_from_bit(plain_modulus_bit: int) -> int:
     """
@@ -145,6 +138,20 @@ def estimate_plain_modulus_from_bit(plain_modulus_bit: int) -> int:
     """
     b = max(2, int(plain_modulus_bit))
     return (1 << b) - 1
+
+
+def estimate_min_plain_modulus_bit_for_chunk1(per_round_upper_bound: int, max_weight: int) -> int:
+    """
+    Estimate the minimum plain_modulus bit-size so chunk_k=1 can satisfy centered decode guard:
+      per_round_upper_bound < 2p/3  =>  p > 3*bound/2
+    Also requires encoded weight < p.
+    """
+    bound = max(0, int(per_round_upper_bound))
+    w = max(0, int(max_weight))
+    # strict inequality for safety
+    p_needed_from_bound = ((bound * DECODE_POSITIVE_GUARD_DEN) // DECODE_POSITIVE_GUARD_NUM) + 1
+    p_needed = max(w + 1, p_needed_from_bound, 2)
+    return max(2, int(p_needed).bit_length())
 
 
 def estimate_per_round_upper_bound(intersection_size: int, max_weight: int) -> int:
@@ -175,174 +182,6 @@ def estimate_weighted_chunk_k_from_bound(
     if safe_chunk_limit <= 0:
         return 0
     return max(0, min(int(mom_k), safe_chunk_limit // int(per_round_upper_bound)))
-
-SCALE_VECTOR_BASE_WEIGHT = 8192
-# Keep helper assets under helper/.
-SCALE_VECTOR_RANDOM_CSV = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "helper",
-    "scale_vector_random.csv",
-)
-# Fallback vector for max_weight=8192 under current random-mode estimator, indexed by set_size_bit in [1,24].
-FALLBACK_SCALE_VECTOR_BASE_BY_SET_SIZE_BIT = [
-    64, 64, 64, 128, 128, 256, 256, 512, 512, 1024, 1024, 2048,
-    2048, 4096, 4096, 8192, 8192, 16384, 16384, 32768, 32768, 65536, 65536, 131072,
-]
-
-def _load_scale_vector_base_from_csv(csv_path: str, base_weight: int):
-    """
-    Load scale vector (set_size_bit 1..24) from helper CSV.
-    Expected columns: mode,set_size_bit,...,max_weight,recommended_weight_scale_div
-    """
-    if not os.path.exists(csv_path):
-        return None
-
-    scales_by_bit = {}
-    try:
-        with open(csv_path, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row.get("mode") != "random":
-                    continue
-                try:
-                    max_weight = int(row.get("max_weight", "0"))
-                    set_size_bit = int(row.get("set_size_bit", "0"))
-                    scale = int(row.get("recommended_weight_scale_div", "0"))
-                except ValueError:
-                    continue
-                if max_weight != base_weight:
-                    continue
-                if set_size_bit < 1 or set_size_bit > 24 or scale < 1:
-                    continue
-
-                prev = scales_by_bit.get(set_size_bit)
-                scales_by_bit[set_size_bit] = scale if prev is None else max(prev, scale)
-    except OSError:
-        return None
-
-    if len(scales_by_bit) != 24:
-        return None
-    return [scales_by_bit[b] for b in range(1, 25)]
-
-
-SCALE_VECTOR_BASE_BY_SET_SIZE_BIT = _load_scale_vector_base_from_csv(
-    SCALE_VECTOR_RANDOM_CSV, SCALE_VECTOR_BASE_WEIGHT
-) or FALLBACK_SCALE_VECTOR_BASE_BY_SET_SIZE_BIT
-
-
-def auto_weight_scale_div_formula(
-    set_size: int,
-    max_weight: int,
-    plain_modulus_bit: int = 24,
-    mom_k: int = 400,
-    overlap_factor: float = 1.0,
-) -> int:
-    """
-    Formula-based estimator for weight_scale_div.
-
-    Model (same random-weight mode as gendata):
-      - intersection ~= set_size / 2
-      - E[w] = (max_weight + 1) / 2
-      - E[weighted_intersection_sum] ~= intersection * E[w]^2
-      - one tt-bucket sums mom_k rounds, so expected bucket magnitude scales by mom_k
-
-    overlap_factor:
-      - 1.0 for current random-mode gendata assumption.
-      - >1.0 for conservative client-overlap assumptions.
-
-    We pick scale so expected bucket stays around <= plain_modulus/2, then round up to power-of-two.
-    """
-    if max_weight <= 0:
-        return 1
-
-    set_size = max(1, int(set_size))
-    mom_k = max(1, int(mom_k))
-    plain_modulus_bit = max(2, int(plain_modulus_bit))
-
-    # BFV batching modulus is a prime close to 2^plain_modulus_bit.
-    plain_modulus_est = float((1 << plain_modulus_bit) - 1)
-    intersection_est = float(max(1, set_size // 2))
-    overlap_factor = max(1.0, float(overlap_factor))
-    effective_intersection_est = intersection_est * overlap_factor
-    mean_weight = (float(max_weight) + 1.0) / 2.0
-    expected_weighted_sum = effective_intersection_est * mean_weight * mean_weight
-    expected_bucket_sum = expected_weighted_sum * float(mom_k)
-
-    # Keep expected bucket around <= p/2 to limit wraparound in mod-p recovery.
-    # For tiny intersections, the product-of-weights variance is very high, so
-    # a pure mean-based estimate is often too optimistic. Add a small safety
-    # factor that decays with sqrt(intersection_est) and is neutral for
-    # moderate/large intersections.
-    tail_safety = max(1.0, 2.0 / math.sqrt(effective_intersection_est))
-    expected_bucket_sum *= tail_safety
-    target_bucket = plain_modulus_est / 2.0
-    required_from_bucket = math.sqrt(max(1.0, expected_bucket_sum / max(1.0, target_bucket)))
-
-    # Also ensure encoded weight is representable (< plain_modulus).
-    required_from_encoding = float(max_weight) / max(1.0, plain_modulus_est - 1.0)
-
-    required = max(1.0, required_from_bucket, required_from_encoding)
-    scale = _next_power_of_two(int(math.ceil(required)))
-    return max(1, scale)
-
-
-def auto_weight_scale_div_vector(set_size_bit: int, max_weight: int) -> int:
-    """Vector estimator keyed by set_size_bit, scaled from base max_weight=8192."""
-    if max_weight <= 0:
-        return 1
-    if set_size_bit < 1:
-        set_size_bit = 1
-    if set_size_bit > len(SCALE_VECTOR_BASE_BY_SET_SIZE_BIT):
-        set_size_bit = len(SCALE_VECTOR_BASE_BY_SET_SIZE_BIT)
-    base_scale = SCALE_VECTOR_BASE_BY_SET_SIZE_BIT[set_size_bit - 1]
-    scaled = (base_scale * float(max_weight)) / float(SCALE_VECTOR_BASE_WEIGHT)
-    return max(1, _next_power_of_two(int(math.ceil(scaled))))
-
-
-def auto_weight_scale_div(
-    set_size_bit: int,
-    set_size: int,
-    max_weight: int,
-    num_clients_per_server: int,
-    plain_modulus_bit: int = 24,
-    mom_k: int = 400,
-    model: str = "vector_conservative",
-) -> int:
-    """
-    Unified auto estimator.
-
-    model:
-      - vector: set_size_bit vector + max_weight scaling.
-      - vector_conservative: vector baseline, then max(...) with conservative client-overlap formula.
-      - formula: pure formula with overlap_factor=1.0.
-    """
-    if max_weight <= 0:
-        return 1
-
-    if model == "vector":
-        return auto_weight_scale_div_vector(set_size_bit=set_size_bit, max_weight=max_weight)
-
-    if model == "vector_conservative":
-        vec_scale = auto_weight_scale_div_vector(set_size_bit=set_size_bit, max_weight=max_weight)
-        conservative_scale = auto_weight_scale_div_formula(
-            set_size=set_size,
-            max_weight=max_weight,
-            plain_modulus_bit=plain_modulus_bit,
-            mom_k=mom_k,
-            overlap_factor=float(max(1, num_clients_per_server)),
-        )
-        return max(vec_scale, conservative_scale)
-
-    if model == "formula":
-        return auto_weight_scale_div_formula(
-            set_size=set_size,
-            max_weight=max_weight,
-            plain_modulus_bit=plain_modulus_bit,
-            mom_k=mom_k,
-            overlap_factor=1.0,
-        )
-
-    raise ValueError(f"Unknown auto weight scale model: {model}")
 
 def read_gendata_config(config_path):
     """Read key=value pairs from gendata config.txt"""
@@ -531,10 +370,12 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     server1_cmd = f"./bin/psi_server -p 1 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
+                  f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
                   f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
     server2_cmd = f"./bin/psi_server -p 2 --port={PORT} --psi_mode=fhe " \
                   f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                   f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
+                  f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
                   f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
     server1_process = start_process(server1_cmd, "Server 1 (FHE)")
     server2_process = start_process(server2_cmd, "Server 2 (FHE)")
@@ -550,6 +391,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
+                     f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
                      f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
@@ -562,6 +404,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--data_file={data_file} --psi_mode=fhe " \
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
+                     f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
                      f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
@@ -723,7 +566,8 @@ def test_fhe_psi(seed_size_bit):
 def main():
     """Main function"""
     global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER
-    global VERBOSE, MAX_WEIGHT, WEIGHT_SCALE_DIV, WEIGHTED_MULTILIMB_EXACT, WEIGHTED_LIMB_BITS, WEIGHTED_CHUNK_K
+    global VERBOSE, MAX_WEIGHT, WEIGHTED_MULTILIMB_EXACT, WEIGHTED_LIMB_BITS, WEIGHTED_CHUNK_K
+    global SEAL_PLAIN_MODULUS_BIT
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -735,14 +579,15 @@ def main():
                        help='Seed size as power of 2 (e.g., 6 for 2^6 = 64 bits)')
     parser.add_argument('--num_clients_per_server', type=int, default=1,
                        help='Number of clients connected to each server (default: 1)')
+    parser.add_argument('--seal_plain_modulus', type=int, default=DEFAULT_SEAL_PLAIN_MODULUS_BIT,
+                       help='SEAL plain_modulus bit-size (default: 24).')
+    parser.add_argument('--seal_plain_modulus_auto_min', action='store_true',
+                       help='Auto-pick a smaller plain_modulus bit-size for chunk_k=1 bound (weighted mode).')
     parser.add_argument('--max_weight', type=int, default=0,
                        help='If >0, gendata assigns each element a uniform random weight in [1, max_weight]. '
                             'Default 0 = no weight column (unweighted).')
     parser.add_argument('--weight_scale_div', type=int, default=0,
                        help='Deprecated and ignored. Weight scaling is currently disabled.')
-    parser.add_argument('--weight_scale_auto_model', type=str, default="vector_conservative",
-                       choices=["vector", "vector_conservative", "formula"],
-                       help='Deprecated and ignored. Kept for CLI compatibility.')
     parser.add_argument('--weighted_multilimb_exact', action='store_true',
                        help='Weighted mode only: use limb-decomposed OLE recovery path in 2PC '
                             '(no per-round residue reveal; still modulo plain_modulus).')
@@ -752,7 +597,7 @@ def main():
                        help='Weighted mode only: split each tt bucket into chunks of this size in 2PC recovery '
                             '(0=auto-estimate from p/intersection/max_weight, manual value must be <= mom_k=400).')
     parser.add_argument('--output_log', type=str, default=None,
-                       help='Output log file (default: fhe_test_<set_size_bit>.log)')
+                       help='Output log file (default: fhe_test_single.log)')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Stream all logs to the terminal (default: only timing results and errors).')
 
@@ -764,7 +609,7 @@ def main():
     PRG_DD = args.prg_dd
     NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
     MAX_WEIGHT = args.max_weight
-    WEIGHT_SCALE_DIV = 1
+    SEAL_PLAIN_MODULUS_BIT = args.seal_plain_modulus
     WEIGHTED_MULTILIMB_EXACT = args.weighted_multilimb_exact
     WEIGHTED_LIMB_BITS = args.weighted_limb_bits
     WEIGHTED_CHUNK_K = args.weighted_chunk_k
@@ -772,15 +617,38 @@ def main():
     if WEIGHTED_LIMB_BITS < 1 or WEIGHTED_LIMB_BITS > 16:
         log("Error: --weighted_limb_bits must be in [1,16]", "ERROR")
         return False
+    if SEAL_PLAIN_MODULUS_BIT < 2:
+        log("Error: --seal_plain_modulus must be >= 2", "ERROR")
+        return False
     if WEIGHTED_CHUNK_K < 0:
         log("Error: --weighted_chunk_k must be >= 0", "ERROR")
         return False
 
-    chunk_mode = "disabled"
-    plain_modulus_est = estimate_plain_modulus_from_bit(SEAL_PLAIN_MODULUS_BIT)
     per_round_upper_bound = 0
     if MAX_WEIGHT > 0:
         per_round_upper_bound = estimate_per_round_upper_bound(INTERSECTION_SIZE, MAX_WEIGHT)
+        if args.seal_plain_modulus_auto_min:
+            auto_min_bit = estimate_min_plain_modulus_bit_for_chunk1(
+                per_round_upper_bound=per_round_upper_bound,
+                max_weight=MAX_WEIGHT,
+            )
+            if auto_min_bit < SEAL_PLAIN_MODULUS_BIT:
+                SEAL_PLAIN_MODULUS_BIT = auto_min_bit
+                log(
+                    f"Auto plain_modulus bit enabled: lowered to {SEAL_PLAIN_MODULUS_BIT} "
+                    "for chunk_k=1 decode safety bound.",
+                    "WARNING",
+                )
+            else:
+                log(
+                    f"Auto plain_modulus bit enabled: keep {SEAL_PLAIN_MODULUS_BIT} "
+                    f"(auto_min={auto_min_bit}).",
+                    "WARNING",
+                )
+
+    plain_modulus_est = estimate_plain_modulus_from_bit(SEAL_PLAIN_MODULUS_BIT)
+
+    if MAX_WEIGHT > 0:
         if per_round_upper_bound >= plain_modulus_est:
             max_weight_limit = int(math.isqrt(max(0, plain_modulus_est - 1) // max(1, INTERSECTION_SIZE)))
             max_intersection_limit = int((plain_modulus_est - 1) // max(1, MAX_WEIGHT * MAX_WEIGHT))
@@ -809,10 +677,8 @@ def main():
                 )
                 return False
             WEIGHTED_CHUNK_K = auto_chunk
-            chunk_mode = "auto"
         else:
             WEIGHTED_CHUNK_K = args.weighted_chunk_k
-            chunk_mode = "manual"
 
         if WEIGHTED_CHUNK_K > MOM_K:
             log(f"Error: --weighted_chunk_k must be <= mom_k ({MOM_K})", "ERROR")
@@ -823,7 +689,7 @@ def main():
     if args.output_log:
         LOG_FILE = args.output_log
     else:
-        LOG_FILE = f"fhe_test_{args.set_size_bit}.log"
+        LOG_FILE = f"fhe_test_single.log"
     
     # Clear previous log file
     if os.path.exists(LOG_FILE):
@@ -834,6 +700,7 @@ def main():
     log(f"PRG DD: {PRG_DD}")
     log(f"Clients per server: {NUM_CLIENTS_PER_SERVER}")
     log(f"Total clients: {2 * NUM_CLIENTS_PER_SERVER}")
+    log(f"SEAL plain_modulus bit: {SEAL_PLAIN_MODULUS_BIT}")
     log(f"Max weight: {MAX_WEIGHT} ({'unweighted' if MAX_WEIGHT == 0 else f'random in [1, {MAX_WEIGHT}]'})")
     if MAX_WEIGHT > 0:
         log(
@@ -852,12 +719,6 @@ def main():
             log(
                 f"Weighted multi-limb OLE mode enabled (limb_bits={WEIGHTED_LIMB_BITS}); "
                 "no per-round residue reveal, bucket-level reveal only",
-                "WARNING"
-            )
-        if WEIGHTED_CHUNK_K > 0:
-            log(
-                "Weighted chunk aggregation enabled in recovery: "
-                f"weighted_chunk_k={WEIGHTED_CHUNK_K} (mom_k={MOM_K}, mode={chunk_mode})",
                 "WARNING"
             )
     log(f"Logging to: {LOG_FILE}")

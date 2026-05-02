@@ -1,9 +1,0 @@
-mode=random
-random_seed=1777516158647643938
-intersection_size=1
-universal_size_bit=24
-num_clients_per_server=1
-set_size=2
-actual_intersection_size=1
-max_weight=4294967296
-weighted_intersection_sum=3030542981079689716

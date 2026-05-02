@@ -36,10 +36,10 @@ python3 fhe_test_single.py
 # define your own parameter
 python3 fhe_test_single.py --set_size_bit 1 --prg_dd 7  --seed_size_bit 8 --num_clients_per_server 1 --output_log fhe_test_small_unweighted.log -v  
 # add small weight
-## We currently requires final output < p. For final output > p , need CRT multi-modulus/multi-limb, which will increase running cost. 
+## We currently requires final output < 2^14,  (corresponding to --max_weight 128, --set_size_bit 1).
 python3 fhe_test_single.py \
   --set_size_bit 1 --prg_dd 7 --seed_size_bit 8 \
-  --num_clients_per_server 1 --max_weight 3000 \
+  --num_clients_per_server 1 --max_weight 128 \
   --output_log fhe_test_small_weighted.log -v
 ```
 Exits 0 on pass, 1 on fail.
@@ -52,13 +52,14 @@ Switch to `large-seal profile` (`16384 / 24 / {54, 54, 54, 54, 50, 18}`), rebuil
 ```bash
 perl -0777 -i -pe 's/size_t seal_degree = \d+;/size_t seal_degree = 16384;/; s/size_t seal_plain_modulus = \d+;/size_t seal_plain_modulus = 24;/; s/std::vector<int> seal_coeff_modulus = \{[^}]+\};/std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};/;' include/config.h && \
 cmake . && make -j"$(nproc)" && \
+## We currently requires final output < 2/3p, (for p=2^24, corresponds to --set_size_bit 1  and --max_weight 3200).  For larger output, requires CRT + multi-limb
 python3 fhe_test_single.py \
   --set_size_bit 1 \
   --prg_dd 8 \
   --seed_size_bit 8 \
   --num_clients_per_server 1 \
   --max_weight 3200 \
-  --output_log fhe_test_large_weighted_limb.log \
+  --output_log fhe_test_large_weighted.log \
   -v
 ```
 
@@ -128,7 +129,6 @@ Usage: `./fhe_run_agg_time.sh [CLIENTS_PER_SIDE]`
 | `CLIENTS_PER_SIDE` | positional `$1` | `100` | Per-server client count |
 
 ```bash
-./fhe_run_agg_time.sh           # defaults: 100 clients/side, seed_bit=6
 ./fhe_run_agg_time.sh 10        # 10 clients per side
 ./fhe_run_agg_time.sh 1         # smallest setup (2 clients total)
 ```
