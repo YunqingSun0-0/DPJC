@@ -52,14 +52,18 @@ void GlobalConfig::parse_args(int argc, char** argv) {
         } else if (auto val = get_value("--num_clients_per_server="); !val.empty()) {
             num_clients_per_server = std::stoi(val);
         } else if (auto val = get_value("--weight_scale_div="); !val.empty()) {
-            weight_scale_div = std::stoull(val);
-            if (weight_scale_div == 0) {
-                throw std::invalid_argument("--weight_scale_div must be >= 1");
-            }
+            (void)val;
+            // Deprecated: weight scaling is disabled. Keep arg for compatibility.
+            weight_scale_div = 1;
         } else if (auto val = get_value("--weighted_limb_bits="); !val.empty()) {
             weighted_limb_bits = std::stoi(val);
             if (weighted_limb_bits <= 0 || weighted_limb_bits > 16) {
                 throw std::invalid_argument("--weighted_limb_bits must be in [1, 16]");
+            }
+        } else if (auto val = get_value("--weighted_chunk_k="); !val.empty()) {
+            weighted_chunk_k = std::stoi(val);
+            if (weighted_chunk_k < 0) {
+                throw std::invalid_argument("--weighted_chunk_k must be >= 0");
             }
         } else if (arg == "--weighted_mode") {
             weighted_mode = true;

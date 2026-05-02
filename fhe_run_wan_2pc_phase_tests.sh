@@ -23,9 +23,9 @@ THROTTLE_INTERFACE="auto"
 WAN_BANDWIDTH_MBIT="200"
 WAN_LATENCY_MS=40
 MAX_WEIGHT=0
-WEIGHT_SCALE_DIV=1
 WEIGHTED_MULTILIMB_EXACT=0
 WEIGHTED_LIMB_BITS=16
+WEIGHTED_CHUNK_K=0
 
 FULL_LOG_FILE="${LOG_DIR}/wan_2pc_full_${ROLE:-unknown}_${TIMESTAMP}.log"
 ANALYSIS_LOG_FILE="${LOG_DIR}/wan_2pc_analysis_${ROLE:-unknown}_${TIMESTAMP}.log"
@@ -53,9 +53,10 @@ Options:
   --wan-bandwidth-mbit <mbit>
   --wan-latency-ms <ms>
   --max-weight <int>                Enable weighted mode when >0
-  --weight-scale-div <int>          Weighted mode scale divisor (>=1)
+  --weight-scale-div <int>          Deprecated and ignored (weight scaling disabled)
   --weighted-multilimb-exact        Enable limb-decomposed OLE recovery path
   --weighted-limb-bits <1..16>      Limb width (default 16)
+  --weighted-chunk-k <int>          Weighted mode: split each tt bucket into chunks in recovery (0=disabled)
   --help
 
 Notes:
@@ -123,7 +124,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --weight-scale-div)
-            WEIGHT_SCALE_DIV="$2"
+            # Deprecated: accept for compatibility, but ignore.
             shift 2
             ;;
         --weighted-multilimb-exact)
@@ -132,6 +133,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --weighted-limb-bits)
             WEIGHTED_LIMB_BITS="$2"
+            shift 2
+            ;;
+        --weighted-chunk-k)
+            WEIGHTED_CHUNK_K="$2"
             shift 2
             ;;
         --generate-data)
@@ -160,12 +165,12 @@ if ! [[ "${MAX_WEIGHT}" =~ ^[0-9]+$ ]]; then
     echo "--max-weight must be a non-negative integer" >&2
     exit 1
 fi
-if ! [[ "${WEIGHT_SCALE_DIV}" =~ ^[0-9]+$ ]] || [[ "${WEIGHT_SCALE_DIV}" -lt 1 ]]; then
-    echo "--weight-scale-div must be an integer >= 1" >&2
-    exit 1
-fi
 if ! [[ "${WEIGHTED_LIMB_BITS}" =~ ^[0-9]+$ ]] || [[ "${WEIGHTED_LIMB_BITS}" -lt 1 || "${WEIGHTED_LIMB_BITS}" -gt 16 ]]; then
     echo "--weighted-limb-bits must be in [1,16]" >&2
+    exit 1
+fi
+if ! [[ "${WEIGHTED_CHUNK_K}" =~ ^[0-9]+$ ]]; then
+    echo "--weighted-chunk-k must be an integer >= 0" >&2
     exit 1
 fi
 
@@ -271,7 +276,7 @@ log_both "Server 2 host: ${SERVER2_HOST}"
 log_both "Data dir: ${DATA_DIR}"
 log_both "Max weight: ${MAX_WEIGHT} ($( [[ "${MAX_WEIGHT}" -gt 0 ]] && echo weighted || echo unweighted ))"
 if [[ "${MAX_WEIGHT}" -gt 0 ]]; then
-    log_both "Weighted flags: --weighted_mode --weight_scale_div=${WEIGHT_SCALE_DIV}$( [[ "${WEIGHTED_MULTILIMB_EXACT}" -eq 1 ]] && echo " --weighted_multilimb_exact --weighted_limb_bits=${WEIGHTED_LIMB_BITS}" )"
+    log_both "Weighted flags: --weighted_mode$( [[ "${WEIGHTED_MULTILIMB_EXACT}" -eq 1 ]] && echo " --weighted_multilimb_exact --weighted_limb_bits=${WEIGHTED_LIMB_BITS}" )$( [[ "${WEIGHTED_CHUNK_K}" -gt 0 ]] && echo " --weighted_chunk_k=${WEIGHTED_CHUNK_K}" )"
 fi
 log_both "Logs:"
 log_both "  - Full log: ${FULL_LOG_FILE}"
@@ -318,9 +323,12 @@ for seed_bits in "${SEED_BITS[@]}"; do
     cd "${REPO_DIR}"
     weighted_flags=()
     if [[ "${MAX_WEIGHT}" -gt 0 ]]; then
-        weighted_flags+=(--weighted_mode "--weight_scale_div=${WEIGHT_SCALE_DIV}")
+        weighted_flags+=(--weighted_mode)
         if [[ "${WEIGHTED_MULTILIMB_EXACT}" -eq 1 ]]; then
             weighted_flags+=(--weighted_multilimb_exact "--weighted_limb_bits=${WEIGHTED_LIMB_BITS}")
+        fi
+        if [[ "${WEIGHTED_CHUNK_K}" -gt 0 ]]; then
+            weighted_flags+=("--weighted_chunk_k=${WEIGHTED_CHUNK_K}")
         fi
     fi
 

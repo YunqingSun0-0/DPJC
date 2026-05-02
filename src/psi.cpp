@@ -93,6 +93,12 @@ inline uint32_t mul_mod_u32(uint32_t a, uint32_t b, uint32_t p) {
     return (uint32_t)(z % p);
 }
 
+inline int64_t decode_centered_modp_u32(uint32_t value_mod_p, uint32_t p, uint32_t mod23_p) {
+    return (value_mod_p >= mod23_p)
+        ? ((int64_t)value_mod_p - (int64_t)p)
+        : (int64_t)value_mod_p;
+}
+
 inline uint32_t pow2_mod_u32(int exponent, uint32_t p) {
     ASSERT_MSG(exponent >= 0, "pow2 exponent must be non-negative");
     uint64_t result = 1 % p;
@@ -125,30 +131,20 @@ inline int ole_bit_length_from_plain_modulus(uint64_t plain_modulus) {
     return bit_length;
 }
 
-inline uint64_t encode_weight_with_optional_scaling(
+inline uint64_t encode_weight_without_scaling(
     int64_t raw_weight,
-    uint64_t weight_scale_div,
     uint64_t plain_modulus
 ) {
     ASSERT_MSG(raw_weight > 0, "weight must be a positive integer");
-    ASSERT_MSG(weight_scale_div >= 1, "weight_scale_div must be >= 1");
     ASSERT_MSG(plain_modulus >= 2, "plain_modulus must be >= 2");
 
-    const uint64_t weight_u64 = static_cast<uint64_t>(raw_weight);
-    uint64_t encoded = weight_u64;
-    if (weight_scale_div > 1) {
-        // Round-to-nearest integer for positive weights.
-        encoded = (weight_u64 + (weight_scale_div / 2)) / weight_scale_div;
-        if (encoded == 0) {
-            encoded = 1;
-        }
-    }
+    const uint64_t encoded = static_cast<uint64_t>(raw_weight);
 
     if (encoded >= plain_modulus) {
         std::ostringstream oss;
         oss << "encoded weight " << encoded
             << " must be < plain_modulus " << plain_modulus
-            << " (try increasing --weight_scale_div)";
+            << " (weight scaling is disabled)";
         throw std::runtime_error(oss.str());
     }
     return encoded;
@@ -156,19 +152,10 @@ inline uint64_t encode_weight_with_optional_scaling(
 
 inline int64_t restore_weight_scale_if_needed(
     int64_t estimate_scaled,
-    int mom_kk,
-    bool weighted_mode,
-    uint64_t weight_scale_div
+    int mom_kk
 ) {
     ASSERT_MSG(mom_kk > 0, "mom_kk must be positive");
     __int128 value = static_cast<__int128>(estimate_scaled);
-
-    if (weighted_mode && weight_scale_div > 1) {
-        const __int128 scale_sq =
-            static_cast<__int128>(weight_scale_div) * static_cast<__int128>(weight_scale_div);
-        value *= scale_sq;
-    }
-
     value /= static_cast<__int128>(mom_kk);
 
     if (value > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
@@ -560,9 +547,16 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     int64_t psi_ca = 0;
     const bool use_weighted_multilimb_exact =
         (config.weighted_mode && config.weighted_multilimb_exact);
+    const bool use_weighted_chunk_split =
+        (config.weighted_mode && config.weighted_chunk_k > 0 && config.weighted_chunk_k < config.mom_kk);
+    const int weighted_chunk_k_effective = use_weighted_chunk_split ? config.weighted_chunk_k : config.mom_kk;
     if (party == 1 && use_weighted_multilimb_exact) {
         std::cerr << "[Server1] weighted_multilimb_exact enabled: "
                   << "limb-decomposed OLE recovery (no per-round residue reveal)." << std::endl;
+    }
+    if (party == 1 && use_weighted_chunk_split) {
+        std::cerr << "[Server1] weighted_chunk_k enabled: split each tt bucket into chunks of "
+                  << weighted_chunk_k_effective << " rounds for recovery aggregation." << std::endl;
     }
 
     int64_t *esti_sum = new int64_t[get_config().mom_tt];
@@ -639,33 +633,36 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         ole.compute(out_yx_11, in_yx_11);
 
         for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            uint32_t bucket_share = 0;
-            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint32_t prod_share = local_terms[i];
+            int64_t bucket_sum_signed = 0;
+            for (int kk = 0; kk < get_config().mom_kk;) {
+                const int chunk = std::min(weighted_chunk_k_effective, get_config().mom_kk - kk);
+                uint32_t chunk_share = 0;
+                for (int local = 0; local < chunk; ++local, ++kk, ++i) {
+                    uint32_t prod_share = local_terms[i];
 
-                uint32_t cross_xy = out_xy_00[i];
-                uint32_t cross_xy_01_10 = add_mod_u32(out_xy_01[i], out_xy_10[i], plain_mod_u32);
-                cross_xy_01_10 = mul_mod_u32(cross_xy_01_10, shift_limb_mod, plain_mod_u32);
-                uint32_t cross_xy_11 = mul_mod_u32(out_xy_11[i], shift_2limb_mod, plain_mod_u32);
-                cross_xy = add_mod_u32(cross_xy, cross_xy_01_10, plain_mod_u32);
-                cross_xy = add_mod_u32(cross_xy, cross_xy_11, plain_mod_u32);
+                    uint32_t cross_xy = out_xy_00[i];
+                    uint32_t cross_xy_01_10 = add_mod_u32(out_xy_01[i], out_xy_10[i], plain_mod_u32);
+                    cross_xy_01_10 = mul_mod_u32(cross_xy_01_10, shift_limb_mod, plain_mod_u32);
+                    uint32_t cross_xy_11 = mul_mod_u32(out_xy_11[i], shift_2limb_mod, plain_mod_u32);
+                    cross_xy = add_mod_u32(cross_xy, cross_xy_01_10, plain_mod_u32);
+                    cross_xy = add_mod_u32(cross_xy, cross_xy_11, plain_mod_u32);
 
-                uint32_t cross_yx = out_yx_00[i];
-                uint32_t cross_yx_01_10 = add_mod_u32(out_yx_01[i], out_yx_10[i], plain_mod_u32);
-                cross_yx_01_10 = mul_mod_u32(cross_yx_01_10, shift_limb_mod, plain_mod_u32);
-                uint32_t cross_yx_11 = mul_mod_u32(out_yx_11[i], shift_2limb_mod, plain_mod_u32);
-                cross_yx = add_mod_u32(cross_yx, cross_yx_01_10, plain_mod_u32);
-                cross_yx = add_mod_u32(cross_yx, cross_yx_11, plain_mod_u32);
+                    uint32_t cross_yx = out_yx_00[i];
+                    uint32_t cross_yx_01_10 = add_mod_u32(out_yx_01[i], out_yx_10[i], plain_mod_u32);
+                    cross_yx_01_10 = mul_mod_u32(cross_yx_01_10, shift_limb_mod, plain_mod_u32);
+                    uint32_t cross_yx_11 = mul_mod_u32(out_yx_11[i], shift_2limb_mod, plain_mod_u32);
+                    cross_yx = add_mod_u32(cross_yx, cross_yx_01_10, plain_mod_u32);
+                    cross_yx = add_mod_u32(cross_yx, cross_yx_11, plain_mod_u32);
 
-                prod_share = add_mod_u32(prod_share, cross_xy, plain_mod_u32);
-                prod_share = add_mod_u32(prod_share, cross_yx, plain_mod_u32);
-                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
+                    prod_share = add_mod_u32(prod_share, cross_xy, plain_mod_u32);
+                    prod_share = add_mod_u32(prod_share, cross_yx, plain_mod_u32);
+                    chunk_share = add_mod_u32(chunk_share, prod_share, plain_mod_u32);
+                }
+
+                const uint32_t chunk_sum_modp = reveal_share_u32_modp(chunk_share, plain_mod_u32, party, server_io);
+                bucket_sum_signed += decode_centered_modp_u32(chunk_sum_modp, plain_mod_u32, mod23_u32);
             }
-
-            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
-            esti_sum[tt] = (bucket_sum >= mod23_u32)
-                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
-                : (int64_t)bucket_sum;
+            esti_sum[tt] = bucket_sum_signed;
         }
         delete cot;
     } else {
@@ -702,19 +699,22 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         ole.compute(cross2_out, cross2_in);
 
         for (int tt = 0, i = 0; tt < get_config().mom_tt; ++tt) {
-            uint32_t bucket_share = 0;
-            for (int kk = 0; kk < get_config().mom_kk; ++kk, ++i) {
-                uint32_t prod_share = local_terms[i];
-                prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
-                prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
-                bucket_share = add_mod_u32(bucket_share, prod_share, plain_mod_u32);
-            }
+            int64_t bucket_sum_signed = 0;
+            for (int kk = 0; kk < get_config().mom_kk;) {
+                const int chunk = std::min(weighted_chunk_k_effective, get_config().mom_kk - kk);
+                uint32_t chunk_share = 0;
+                for (int local = 0; local < chunk; ++local, ++kk, ++i) {
+                    uint32_t prod_share = local_terms[i];
+                    prod_share = add_mod_u32(prod_share, cross1_out[i], plain_mod_u32);
+                    prod_share = add_mod_u32(prod_share, cross2_out[i], plain_mod_u32);
+                    chunk_share = add_mod_u32(chunk_share, prod_share, plain_mod_u32);
+                }
 
-            // Reveal once per tt-bucket (small communication, limited leakage).
-            uint32_t bucket_sum = reveal_share_u32_modp(bucket_share, plain_mod_u32, party, server_io);
-            esti_sum[tt] = (bucket_sum >= mod23_u32)
-                ? ((int64_t)bucket_sum - (int64_t)plain_mod_u32)
-                : (int64_t)bucket_sum;
+                // Reveal each chunk in weighted chunk mode; legacy path remains one reveal per bucket.
+                const uint32_t chunk_sum_modp = reveal_share_u32_modp(chunk_share, plain_mod_u32, party, server_io);
+                bucket_sum_signed += decode_centered_modp_u32(chunk_sum_modp, plain_mod_u32, mod23_u32);
+            }
+            esti_sum[tt] = bucket_sum_signed;
         }
         delete cot;
     }
@@ -754,9 +754,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     
     return restore_weight_scale_if_needed(
         psi_ca,
-        get_config().mom_kk,
-        config.weighted_mode,
-        config.weight_scale_div
+        get_config().mom_kk
     );
 }
 
@@ -812,17 +810,8 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
     Plaintext weight_plain;
     const uint64_t plain_modulus = parms.plain_modulus().value();
-    const uint64_t weight_scale_div = config.weight_scale_div;
     const bool use_double_add_for_weight =
         config.weighted_mode && is_default_8192_seal_profile(config);
-    if (config.weighted_mode && weight_scale_div > 1) {
-        const long double restore_scale =
-            static_cast<long double>(weight_scale_div) * static_cast<long double>(weight_scale_div);
-        std::cerr << "[Client" << config.party << "] weighted scaling enabled: divide-by "
-                  << weight_scale_div << " before encode, restore by x"
-                  << std::fixed << std::setprecision(0) << restore_scale
-                  << std::defaultfloat << " after recovery" << std::endl;
-    }
     if (use_double_add_for_weight) {
         std::cerr << "[Client" << config.party << "] weighted scalar multiply path: "
                   << "double-add (default 8192 profile)" << std::endl;
@@ -851,8 +840,8 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         }
 
         if (item.weight != 1) {
-            const uint64_t encoded_weight = encode_weight_with_optional_scaling(
-                item.weight, weight_scale_div, plain_modulus);
+            const uint64_t encoded_weight = encode_weight_without_scaling(
+                item.weight, plain_modulus);
             if (encoded_weight != 1) {
                 if (use_double_add_for_weight) {
                     calc_prg[0] = mul_cipher_by_scalar_double_add(calc_prg[0], encoded_weight, evaluator);

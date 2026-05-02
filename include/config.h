@@ -22,13 +22,14 @@ struct GlobalConfig {
 
     int mom_kk = 400, mom_tt = 11; // median of means
     bool weighted_mode = false; // enable weighted-safe 2PC recovery path in FHE mode
-    uint64_t weight_scale_div = 1; // if >1 in weighted mode, encode weight as round(weight / weight_scale_div)
+    uint64_t weight_scale_div = 1; // deprecated: kept only for CLI compatibility, currently ignored
     bool weighted_multilimb_exact = false; // weighted recovery via limb-decomposed OLE path (no per-round residue reveal)
     int weighted_limb_bits = 16; // limb width for weighted_multilimb_exact OLE decomposition path
+    int weighted_chunk_k = 0; // weighted mode only: split each tt bucket into chunks of this size (0 = disabled)
 
-    size_t seal_degree = 8192;
+    size_t seal_degree = 16384;
     size_t seal_plain_modulus = 24;
-    std::vector<int> seal_coeff_modulus = {60, 60, 36, 27, 27};
+    std::vector<int> seal_coeff_modulus = {54, 54, 54, 54, 50, 18};
     /*
     210 = { 60, 60, 36, 27, 27 }; // for default seal modulus = 24/8192
     {60, 60, 36, 27, 27}; // for default seal modulus = 24/16384
