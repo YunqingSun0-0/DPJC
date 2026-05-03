@@ -154,3 +154,5 @@ echo ""
 echo "✓ Test completed!"
 echo "Full log: ${FULL_LOG_FILE}"
 echo "Analysis log: ${ANALYSIS_LOG_FILE}"
+
+# refresh-marker: 20260503T033330Z

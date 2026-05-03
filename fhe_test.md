@@ -143,3 +143,5 @@ Logs land in `fhe_phase/agg_time_<CLIENTS_PER_SIDE>cps_{full,summary}_<timestamp
 - **WAN throttle.** `fhe_run_seed_tests.sh --mode wan` applies `tc` rules via `throttle.py`. If the script crashes mid-run, remove them manually with `python3 throttle.py -i <iface> -d`.
 - **Timeouts.** `fhe_test_single.py` defaults to `TIMEOUT_SECONDS = 7200` (2h). Bump it for very large set sizes.
 - **Output regex coupling.** All extraction relies on exact log lines like `Key generation time: 1.234s` and `Client results aggregation time: ... ms (... us)`. Any change to the C++ logging format ([src/psi.cpp](src/psi.cpp)) will silently break the parsers.
+
+<!-- refresh-marker: 20260503T033330Z -->

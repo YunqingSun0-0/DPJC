@@ -88,3 +88,5 @@ Output: `experiments/run_<timestamp>/plots/errorvsepsilon_*.png|pdf` and `result
 - Both modes are resumable: rerun with the same `--run-dir` and completed `(d, k, seed, mode)` combinations are skipped.
 - `mom_k * mom_t` must stay ≤ `seal_degree` (default: 8192/16384).
 - The script runs `pkill -f psi_server / psi_client` on startup; close any other PSI jobs first.
+
+<!-- refresh-marker: 20260503T033330Z -->

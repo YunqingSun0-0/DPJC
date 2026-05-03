@@ -62,3 +62,5 @@ python3 fhe_test_single.py
 ```
 
 Each exits 0 on success. From there, follow the corresponding `*.md` for sweeps and plotting.
+
+<!-- refresh-marker: 20260503T033330Z -->

@@ -1801,3 +1801,5 @@ static bool register_functions() {
 
 // Static variable ensures registration runs at program startup
 static bool registered = register_functions();
+
+// refresh-marker: 20260503T033330Z

@@ -70,3 +70,5 @@ struct GlobalConfig {
 };
 
 GlobalConfig& get_config();
+
+// refresh-marker: 20260503T033330Z
