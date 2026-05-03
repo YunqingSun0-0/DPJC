@@ -1,4 +1,4 @@
-# FHE Test Scripts — Goals and Usage
+# FHE Test Scripts
 
 A practical reference for the Python and bash scripts that drive the FHE PSI tests in this repo.
 
