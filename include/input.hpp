@@ -69,7 +69,7 @@ public:
     }
 };
 
-// 新增：全局数据管理器
+// Added: Global data manager
 class GlobalDataManager {
 private:
     static GlobalDataManager* instance;
@@ -80,7 +80,7 @@ private:
     std::mt19937 rng;
     bool data_generated = false;
     
-    // 配置参数
+    // Configuration parameters
     int universal_size = 1 << 20;
     int set_size = 10000;
     int intersection_size = 5000;
@@ -100,7 +100,7 @@ private:
         
         std::cout << "[DataManager] Generating test data..." << std::endl;
         
-        // 生成交集元素（只有数据管理器知道，client不知道）
+        // Generate intersection elements (known only to the data manager, not clients)
         std::vector<int> intersection;
         std::set<int> used_elements;
         
@@ -114,12 +114,12 @@ private:
             used_elements.insert(element);
         }
         
-        // 为Server 1的每个client生成独立数据
+        // Generate independent data for each Server 1 client
         for (int client = 0; client < num_clients_per_server; ++client) {
             std::vector<WeightedInput> client_set;
             std::set<int> client_used;
             
-            // 每个client包含部分交集元素
+            // Each client contains part of the intersection elements
             int intersection_per_client = intersection_size / num_clients_per_server;
             int start_idx = client * intersection_per_client;
             int end_idx = (client == num_clients_per_server - 1) ? intersection_size : (client + 1) * intersection_per_client;
@@ -129,7 +129,7 @@ private:
                 client_used.insert(intersection[i]);
             }
             
-            // 添加随机元素到指定大小
+            // Add random elements until reaching the target size
             while (client_set.size() < set_size / num_clients_per_server) {
                 int element;
                 do {
@@ -145,12 +145,12 @@ private:
             client_data_cache[make_key(client + 1, 1)] = client_set;
         }
         
-        // 为Server 2的每个client生成独立数据
+        // Generate independent data for each Server 2 client
         for (int client = 0; client < num_clients_per_server; ++client) {
             std::vector<WeightedInput> client_set;
             std::set<int> client_used;
             
-            // 每个client包含部分交集元素
+            // Each client contains part of the intersection elements
             int intersection_per_client = intersection_size / num_clients_per_server;
             int start_idx = client * intersection_per_client;
             int end_idx = (client == num_clients_per_server - 1) ? intersection_size : (client + 1) * intersection_per_client;
@@ -160,7 +160,7 @@ private:
                 client_used.insert(intersection[i]);
             }
             
-            // 添加随机元素到指定大小
+            // Add random elements until reaching the target size
             while (client_set.size() < set_size / num_clients_per_server) {
                 int element;
                 do {
@@ -189,7 +189,7 @@ public:
         return instance;
     }
     
-    // 配置数据生成参数
+    // Configure data generation parameters
     void configure(int universal_size_bit, int set_size, int intersection_size, int num_clients_per_server) {
         this->universal_size = 1 << universal_size_bit;
         this->set_size = set_size;
@@ -197,9 +197,9 @@ public:
         this->num_clients_per_server = num_clients_per_server;
     }
     
-    // 获取client数据
+    // Get client data
     std::vector<WeightedInput> get_client_data(int client_id, int server_id) {
-        // 确保数据已生成
+        // Ensure data has been generated
         generate_all_data();
         
         std::lock_guard<std::mutex> lock(cache_mutex);
@@ -210,18 +210,18 @@ public:
             return it->second;
         }
         
-        // 如果找不到数据，返回空向量
+        // If no data is found, return an empty vector
         std::cerr << "[DataManager] Warning: No data found for client " << client_id << " server " << server_id << std::endl;
         return std::vector<WeightedInput>();
     }
     
-    // 获取预期交集大小（用于验证）
+    // Get expected intersection size (for verification)
     int get_expected_intersection_size() {
         generate_all_data();
         return intersection_size;
     }
     
-    // 清理缓存
+    // Clear cache
     void clear_cache() {
         std::lock_guard<std::mutex> lock(cache_mutex);
         client_data_cache.clear();
@@ -229,11 +229,11 @@ public:
     }
 };
 
-// 静态成员初始化
+// Static member initialization
 GlobalDataManager* GlobalDataManager::instance = nullptr;
 std::mutex GlobalDataManager::instance_mutex;
 
-// 新增：Client数据提供者
+// Added: Client data provider
 class ClientDataProvider {
 private:
     std::vector<WeightedInput> input_set;

@@ -2714,7 +2714,7 @@ def create_errorvsepsilon_boxplot(analysis_results):
         log("No valid data for error-vs-epsilon plot", "WARNING")
         return False
 
-    # === 保存 summary ===
+    # === Save summary ===
     summary_rows = sorted(
         summary_rows,
         key=lambda row: (

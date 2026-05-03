@@ -51,7 +51,7 @@ std::pair<std::vector<int>, std::vector<int>> generate_sets_with_intersection(
         used_elements.insert(element);
     }
     
-    // 生成集合1的剩余元素
+    // Generate remaining elements for set 1
     std::vector<int> set1 = intersection;
     for (int i = intersection_size; i < set_size; ++i) {
         int element;
@@ -63,7 +63,7 @@ std::pair<std::vector<int>, std::vector<int>> generate_sets_with_intersection(
         used_elements.insert(element);
     }
     
-    // 生成集合2的剩余元素
+    // Generate remaining elements for set 2
     std::vector<int> set2 = intersection;
     for (int i = intersection_size; i < set_size; ++i) {
         int element;
@@ -75,7 +75,7 @@ std::pair<std::vector<int>, std::vector<int>> generate_sets_with_intersection(
         used_elements.insert(element);
     }
     
-    // 随机打乱集合
+    // Shuffle sets randomly
     std::shuffle(set1.begin(), set1.end(), rng);
     std::shuffle(set2.begin(), set2.end(), rng);
     
@@ -96,7 +96,7 @@ std::vector<std::vector<T>> distribute_set_to_clients(
     return client_sets;
 }
 
-// 将数据写入文件
+// Write data to file
 void write_set_to_file(const std::vector<int>& set, const std::string& filename) {
     std::ofstream file(filename);
     if (!file.is_open()) {
@@ -126,7 +126,7 @@ void write_weighted_set_to_file(const std::vector<WeightedWord>& set, const std:
     std::cout << "Written " << set.size() << " weighted elements to " << filename << std::endl;
 }
 
-// 读取 UCI 原始数据
+// Load raw UCI data
 UciDataset load_uci_dataset(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -456,7 +456,7 @@ int main(int argc, char** argv) {
     std::string server1_host = "127.0.0.1";
     int wan_server_id = 0;
 
-    // 解析命令行参数
+    // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
 
@@ -659,7 +659,7 @@ int main(int argc, char** argv) {
 
     std::cout << "  Actual intersection size: " << actual_intersection.size() << "\n\n";
     
-    // 将集合分配给clients
+    // Distribute sets to clients
     auto client_sets_1 = distribute_set_to_clients(set1, num_clients_per_server);
     auto client_sets_2 = distribute_set_to_clients(set2, num_clients_per_server);
 
@@ -692,10 +692,10 @@ int main(int argc, char** argv) {
                   << "  Weighted intersection sum: " << weighted_intersection_sum << "\n";
     }
 
-    // 写入文件模式
+    // File output mode
     std::cout << "Writing data to files:\n";
 
-    // Server 1的clients
+    // Clients for Server 1
     for (int i = 0; i < num_clients_per_server; ++i) {
         std::string filename = output_dir + "/client" + std::to_string(1 + i) + "_1.txt";
         if (emit_weights) {
@@ -705,7 +705,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Server 2的clients
+    // Clients for Server 2
     for (int i = 0; i < num_clients_per_server; ++i) {
         std::string filename = output_dir + "/client" + std::to_string(1 + i) + "_2.txt";
         if (emit_weights) {
@@ -715,7 +715,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 写入配置文件
+    // Write configuration file
     std::ofstream config_file(output_dir + "/config.txt");
     config_file << "mode=random\n";
     config_file << "random_seed=" << random_seed << "\n";

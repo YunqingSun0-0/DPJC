@@ -19,7 +19,7 @@
 #include <thread>
 #include <vector>
 
-// 强断言：带错误信息，默认开启
+// Strong assertion: includes an error message, enabled by default
 #define ASSERT_MSG(expr, msg) \
     do { if (!(expr)) { \
         std::cerr << "[ASSERT FAIL] " << __FILE__ << ":" << __LINE__ << ": " \
@@ -27,14 +27,14 @@
         std::abort(); \
     }} while(0)
 
-// 可关闭断言：NDEBUG 编译时失效
+// Optional assertion: disabled when compiled with NDEBUG
 #ifndef NDEBUG
 #define DEBUG_ASSERT(expr, msg) ASSERT_MSG(expr, msg)
 #else
 #define DEBUG_ASSERT(expr, msg) ((void)0)
 #endif
 
-// 异常检查：库中使用
+// Exception check: used in library code
 #define CHECK_THROW(expr, msg) \
     do { if (!(expr)) throw std::runtime_error(msg); } while(0)
 

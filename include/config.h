@@ -61,11 +61,11 @@ struct GlobalConfig {
     
     int get_server_id(int party) const {
         if (party >= 3 && party <= 2 + num_clients_per_server) {
-            return 1; // 属于Server1的client
+            return 1; // Client belongs to Server1
         } else if (party >= 3 + num_clients_per_server && party <= 2 + 2 * num_clients_per_server) {
-            return 2; // 属于Server2的client
+            return 2; // Client belongs to Server2
         }
-        return 0; // 不是client
+        return 0; // Not a client
     }
 };
 

@@ -22,19 +22,19 @@ void run_client(int client_id, int server_id, const std::string& data_file = "")
     port S2 to n client: config.port + 100 + client_id - 1 + config.num_clients_per_server
     */
 
-    // 创建与对应server的连接
+    // Create a connection to the corresponding server
     emp::NetIO* client_io = new emp::NetIO(server_host, real_port);
     
-    // 获取client的输入集合
+    // Get the client's input set
     std::vector<WeightedInput> input_set;
     
     if (!data_file.empty()) {
-        // 使用文件数据
+        // Use file-based data
         FileInputProvider input(data_file);
         input_set = input.get_input_set();
         std::cout << "[Client" << client_id << "] Loading data from file: " << data_file << std::endl;
     } else {
-        // 使用全局数据管理器
+        // Use the global data manager
         ClientDataProvider input(client_id, server_id);
         input_set = input.get_input_set();
         std::cout << "[Client" << client_id << "] Loading data from global data manager" << std::endl;
@@ -42,7 +42,7 @@ void run_client(int client_id, int server_id, const std::string& data_file = "")
     
     std::cout << "[Client" << client_id << "] input_set size: " << input_set.size() << std::endl;
     
-    // 执行client端的PSI计算
+    // Run client-side PSI computation
     int64_t result = psi_client(client_id, server_id, input_set, client_io);
     
     std::cout << "[Client" << client_id << "] Processing completed" << std::endl;
@@ -55,10 +55,10 @@ int main(int argc, char** argv) {
     int port = 20929;
     std::string data_file = "";
 
-    // 解析通用配置参数
+    // Parse common configuration arguments
     get_config().parse_args(argc, argv);
 
-    // 解析client特定参数
+    // Parse client-specific arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         
@@ -78,16 +78,16 @@ int main(int argc, char** argv) {
     GlobalConfig& config = get_config();
     config.party = client_id + 2;
     
-    // 验证client ID
+    // Validate client ID
     bool valid_client = false;
     int server_id = 0;
     
     if (client_id >= 1 && client_id <= config.num_clients_per_server) {
         valid_client = true;
-        server_id = 1; // 属于Server 1
+        server_id = 1; // Assigned to Server 1
     } else if (client_id >= config.num_clients_per_server + 1 && client_id <= 2 * config.num_clients_per_server) {
         valid_client = true;
-        server_id = 2; // 属于Server 2
+        server_id = 2; // Assigned to Server 2
         client_id = client_id - config.num_clients_per_server;
     }
     

@@ -341,10 +341,10 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
               << ", total_rounds=" << tot_rounds << std::endl;
     ASSERT_MSG(tot_rounds <= config.seal_degree, "one batch is not enough for #rounds");
     
-    // 阶段1: Server生成seed和密钥
+    // Phase 1: Server generates seeds and keys
     std::cerr << "[Server" << party << "] Phase 1: Generating seeds and keys" << std::endl;
 
-    // 开始时间统计
+    // Start timing
     auto start_time = std::chrono::high_resolution_clock::now();
     auto key_gen_start = start_time;
     
@@ -360,7 +360,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     SEALContext context(parms);
     print_parameters(context); 
 
-    // 生成密钥
+    // Generate keys
     KeyGenerator keygen(context);
     SecretKey secret_key = keygen.secret_key(), sk_noise_budget;
     PublicKey public_key;
@@ -373,9 +373,9 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     Evaluator evaluator(context);
     Decryptor decryptor(context, secret_key);
 
-    // 生成并加密seeds
+    // Generate and encrypt seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
-    // std::mt19937_64 rnd(19920929+party*1000000000); // ftest_fhe_vs_naive.py 专用
+    // std::mt19937_64 rnd(19920929+party*1000000000); // Dedicated to ftest_fhe_vs_naive.py
     AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
     std::vector<std::vector<uint64_t>> batch_seed(config.seed_size, std::vector<uint64_t>(batch_encoder.slot_count(), 0ull));
 
@@ -429,12 +429,12 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         evaluator.mod_switch_to_next_inplace(encrypted_seed_2[i]);
     }
 
-    // 计算密钥生成和传输时间
+    // Compute key generation and transfer time
     auto key_gen_end = std::chrono::high_resolution_clock::now();
     auto key_gen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(key_gen_end - key_gen_start);
     double key_gen_time = key_gen_duration.count() / 1000.0;
     
-    // 输出实际通信大小（以server1为准）
+    // Output actual communication size (reported by Server 1)
     if (party == 1) {
         std::cerr << "Key generation time: " << key_gen_time << "s" << std::endl;
         std::cerr << "key_gen_comm_mb: " << (encrypted_seed_1_total_send_bytes / (1024.0 * 1024.0)) << std::endl;
@@ -450,7 +450,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         }
     }
 
-    // 阶段2: 等待client处理完成
+    // Phase 2: Wait for client processing to finish
     for(auto & client_io : client_connections) {
         iosend(party, client_io, relin_key_2);
         for(int i = 0; i < config.seed_size; ++i) iosend(party, client_io, encrypted_seed_2[i]);
@@ -461,7 +461,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     // Reset communication size counter for server1
     if (party == 1) total_communication_size = 0;
     
-    // 接收来自clients的处理结果（不计入聚合计算时间）
+    // Receive processing results from clients (excluded from aggregation compute time)
     std::vector<Ciphertext> client_results;
     client_results.reserve(client_connections.size());
     std::stack<std::pair<int, Ciphertext>> t_stack;
@@ -471,7 +471,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         client_results.push_back(std::move(client_result));
     }
 
-    // 仅统计“收到结果之后，把结果全都加起来”的计算时间（不含网络接收）
+    // Measure only post-receive aggregation compute time (excluding network receive)
     auto client_aggregate_start = std::chrono::high_resolution_clock::now();
     for(const auto & client_result : client_results) {
         auto tmp = std::make_pair(1, client_result);
@@ -503,10 +503,10 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     if (party == 1) {
         std::cerr << "client_server_comm_mb: " << (total_communication_size / (1024.0 * 1024.0)) << std::endl;
     }
-    // 阶段3: Server进行secret sharing和MPC计算
+    // Phase 3: Server performs secret sharing and MPC computation
     std::cerr << "[Server" << party << "] Phase 3: Secret sharing and MPC computation" << std::endl;
 
-    // 与其他server进行secret sharing（会用DD替换估计, 只统计2PC时间）
+    // Secret-share with the other server (2PC time only)
     std::vector<uint64_t> rnd_1(batch_encoder.slot_count(), 0ull), rnd_2;
     for(int i = 0; i < tot_rounds; ++i) {
         rnd_1[i] = std::uniform_int_distribution<uint64_t>(0, parms.plain_modulus().value() - 1)(rnd);
@@ -541,11 +541,11 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
     decryptor.decrypt(esti_cipher_2, rnd_2_plain);
     batch_encoder.decode(rnd_2_plain, rnd_2);
 
-    // 开始服务器恢复时间统计 （只统计2PC时间）
+    // Start server recovery timing (2PC time only)
     auto server_recover_start = std::chrono::high_resolution_clock::now();
     if (party == 1) total_communication_size = 0; //this is for communication of iorecv in seal
 
-    // // MPC计算
+    // // MPC computation
     // if(party == 1) {
     //     iorecv(party, server_io, context, esti_cipher_1);
     //     iorecv(party, server_io, context, esti_cipher_2);
@@ -1007,7 +1007,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         }
     }
     
-    // 计算服务器恢复时间 = 客户端结果聚合 + 2PC
+    // Compute server recovery time = client result aggregation + 2PC
     auto server_recover_end = std::chrono::high_resolution_clock::now();
     auto server_recover_duration = std::chrono::duration_cast<std::chrono::milliseconds>(server_recover_end - server_recover_start);
     double server_2pc_time = server_recover_duration.count() / 1000.0;
@@ -1019,7 +1019,7 @@ int64_t psi_server_fhe(int party, emp::NetIO* server_io, std::vector<emp::NetIO*
         std::cerr << "Server recovery Communication: " << ((total_communication_size + mpc_comm)/ (1024.0 * 1024.0) ) << " MB" << std::endl;
     }
     
-    // 计算总时间
+    // Compute total time
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - start_time);
     double total_time = total_duration.count() / 1000.0;
@@ -1047,7 +1047,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     
     std::cerr << "[Client" << config.party << "] Phase 2: Processing input set" << std::endl;
     
-    // 接收来自server的密钥和seeds
+    // Receive keys and seeds from the server
     EncryptionParameters parms(scheme_type::bfv);
     size_t poly_modulus_degree = config.seal_degree;
     parms.set_poly_modulus_degree(poly_modulus_degree);
@@ -1066,14 +1066,14 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         iorecv(party, io, context, sk_noise_budget);
     }
 
-    // 从对应的server接收密钥和seeds
+    // Receive keys and seeds from the corresponding server
     iorecv(party, io, context, relin_key);
     for(int i = 0; i < config.seed_size; ++i) {
         iorecv(party, io, context, encrypted_seed[i]);
     }
     
-    // 处理输入集合 - 单线程版本
-    // 开始客户端计算时间统计
+    // Process input set - single-threaded version
+    // Start client computation timing
     auto client_compute_start = std::chrono::high_resolution_clock::now();
 
     std::cerr << "[Client" << config.party << "] Using 1 thread for " 
@@ -1097,7 +1097,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         std::vector<int> ids = aes_gen.get_id_group(0, item.value);
         sort(ids.begin(), ids.end());
 
-        // 处理PRG计算
+        // Process PRG computation
         for(int i = 0; i < config.prg_dd; i += 2) {
             if(i + 1 == config.prg_dd) {
                 calc_prg[i] = encrypted_seed[ids[i]];
@@ -1132,7 +1132,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
             }
         }
 
-        // 多层乘法计算
+        // Multi-level multiplication
         for(int w = 2; w < config.prg_dd; w <<= 1) {
             for(int i = 0; i < config.prg_dd; i += (w << 1)) {
                 if(i + w < config.prg_dd) {
@@ -1142,7 +1142,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
             }
         }
 
-        // 累加到stack
+        // Accumulate into the stack
         auto sum_prg = std::make_pair(1, calc_prg[0]);
         while(!t_stack.empty()) {
             auto top = t_stack.top();
@@ -1156,7 +1156,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         t_stack.push(sum_prg);
     }
 
-    // 最终合并
+    // Final merge
     Ciphertext esti_cipher = t_stack.top().second;
     t_stack.pop();
     while(!t_stack.empty()) {
@@ -1164,7 +1164,7 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         t_stack.pop();
     }
 
-    // 计算客户端计算时间
+    // Compute client computation time
     auto client_compute_end = std::chrono::high_resolution_clock::now();
     auto client_compute_duration = std::chrono::duration_cast<std::chrono::milliseconds>(client_compute_end - client_compute_start);
     double client_compute_time = client_compute_duration.count() / 1000.0;
@@ -1172,11 +1172,11 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
     std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
 
-    // 发送结果给对应的server
+    // Send result to the corresponding server
     iosend(party, io, esti_cipher);
     io->flush();
 
-    return -1; // Client不返回PSI大小
+    return -1; // Client does not return PSI size
 }
 
 // -----------------------------------------------------------
@@ -1204,9 +1204,9 @@ int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetI
     
     std::cerr << "[Server" << party << "] Naive PSI: Phase 1 - Generating seeds" << std::endl;
     
-    // 阶段1: 生成明文seeds
+    // Phase 1: Generate plaintext seeds
     std::mt19937_64 rnd(std::chrono::system_clock::now().time_since_epoch().count());
-    // std::mt19937_64 rnd(19920929+party*1000000000); // ftest_fhe_vs_naive.py 专用
+    // std::mt19937_64 rnd(19920929+party*1000000000); // Dedicated to ftest_fhe_vs_naive.py
     AESGen gen_seed(std::uniform_int_distribution<uint64_t>(0, UINT64_MAX)(rnd));
     std::vector<std::vector<uint8_t>> seeds(config.seed_size);
     
@@ -1217,7 +1217,7 @@ int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetI
         }
     }
     
-    // 与其他server交换seeds
+    // Exchange seeds with the other server
     std::vector<std::vector<uint8_t>> seeds_other(config.seed_size, std::vector<uint8_t>(tot_rounds, 0));
     if(party == 1) {
         for(int i = 0; i < config.seed_size; ++i) {
@@ -1245,14 +1245,14 @@ int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetI
         server_io->flush();
     }
     
-    // 计算组合seeds
+    // Compute combined seeds
     std::vector<std::vector<uint8_t>> combined_seeds(config.seed_size);
     for(int i = 0; i < config.seed_size; ++i) {
         for(int j = 0; j < tot_rounds; ++j) 
             combined_seeds[i].push_back(seeds[i][j] ^ seeds_other[i][j]);
     }
     
-    // 阶段2: 发送seeds给clients
+    // Phase 2: Send seeds to clients
     std::cerr << "[Server" << party << "] Naive PSI: Phase 2 - Sending seeds to clients" << std::endl;
     for(auto& client_io : client_connections) {
         for(int i = 0; i < config.seed_size; ++i) {
@@ -1263,7 +1263,7 @@ int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetI
         client_io->flush();
     }
     
-    // 阶段3: 接收clients的处理结果
+    // Phase 3: Receive processing results from clients
     std::cerr << "[Server" << party << "] Naive PSI: Phase 3 - Receiving client results" << std::endl;
     std::vector<int64_t> combined_result(tot_rounds, 0);
     for(auto& client_io : client_connections) {
@@ -1274,7 +1274,7 @@ int64_t psi_server_naive(int party, emp::NetIO* server_io, std::vector<emp::NetI
         }
     }
     
-    // 阶段4: 计算最终结果
+    // Phase 4: Compute final result
     std::cerr << "[Server" << party << "] Naive PSI: Phase 4 - Computing final result" << std::endl;
 
     if(party == 1) {
@@ -1315,7 +1315,7 @@ int64_t psi_client_naive(int client_id, int server_id, const std::vector<Weighte
 
     std::cerr << "[Client" << client_id << "] Naive PSI: Processing input set" << std::endl;
 
-    // 接收来自 server 的 seeds
+    // Receive seeds from the server
     std::vector<std::vector<uint8_t>> seeds(
         config.seed_size, std::vector<uint8_t>(tot_rounds, 0)
     );
@@ -1373,7 +1373,7 @@ int64_t psi_client_naive(int client_id, int server_id, const std::vector<Weighte
         }
     }
 
-    // 发送结果给 server
+    // Send result to the server
     for (int i = 0; i < tot_rounds; ++i) {
         io->send_data(&result[i], sizeof(int64_t));
     }
@@ -1391,7 +1391,7 @@ inline int64_t bool_to_pm1_from_block(const emp::block& b) {
     return (low & 1ULL) ? -1LL : 1LL;
 }
 inline bool prf_bool_item_round(emp::PRG& prg, uint64_t item, uint64_t round) {
-    // 把 (round, item) 编码进一个 128-bit block
+    // Encode (round, item) into a 128-bit block
     emp::block in = emp::makeBlock(round, item);
     emp::block out = in;
 
@@ -1425,7 +1425,7 @@ int64_t psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<e
     std::cerr << "[Server" << party << "] Naive PSI: Phase 1 - Generating seeds" << std::endl;
     
     
-    // 阶段3: 接收clients的处理结果
+    // Phase 3: Receive processing results from clients
     std::cerr << "[Server" << party << "] Naive PSI: Phase 3 - Receiving client results" << std::endl;
     std::vector<int64_t> combined_result(tot_rounds, 0);
     for(auto& client_io : client_connections) {
@@ -1436,7 +1436,7 @@ int64_t psi_server_naive_uniform(int party, emp::NetIO* server_io, std::vector<e
         }
     }
     
-    // 阶段4: 计算最终结果
+    // Phase 4: Compute final result
     std::cerr << "[Server" << party << "] Naive PSI: Phase 4 - Computing final result" << std::endl;
 
     if(party == 1) {
@@ -1479,7 +1479,7 @@ int64_t psi_client_naive_uniform(int client_id, int server_id, const std::vector
 
     std::vector<int64_t> result(tot_rounds, 0);
 
-    // 共享 seed，线程内各自构造 PRG
+    // Share one seed; each thread constructs its own PRG
     const emp::block seed_block = emp::makeBlock(0ULL, (uint64_t)config.prg_seed);
 
     constexpr int BATCH = AES_BATCH_SIZE;
@@ -1492,21 +1492,21 @@ int64_t psi_client_naive_uniform(int client_id, int server_id, const std::vector
 
         int round = 0;
         for (; round + BATCH <= tot_rounds; round += BATCH) {
-            // 构造输入块: (round, item)
+            // Build input blocks: (round, item)
             for (int j = 0; j < BATCH; ++j) {
                 tmp[j] = emp::makeBlock((uint64_t)(round + j), item_u64);
             }
 
-            // 批量 AES
+            // Batched AES
             emp::AES_ecb_encrypt_blks<BATCH>(tmp, &prg.aes);
 
-            // 累加结果
+            // Accumulate results
             for (int j = 0; j < BATCH; ++j) {
                 result[round + j] += weight * bool_to_pm1_from_block(tmp[j]);
             }
         }
 
-        // 处理剩余 rounds
+        // Handle remaining rounds
         int remain = tot_rounds - round;
         if (remain > 0) {
             for (int j = 0; j < remain; ++j) {
@@ -1569,7 +1569,7 @@ inline uint64_t eval_deg3_horner(uint64_t x,
 
 
 int64_t psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
-    //1. 发送prg_seed 给clients，保证server和clients使用相同的随机数
+    // 1. Send prg_seed to clients so servers and clients use the same randomness
     if(get_config().test_mode) {
         uint64_t prg_seed = get_config().prg_seed;
         if(party == 1) {
@@ -1591,7 +1591,7 @@ int64_t psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<
     std::cerr << "[Server" << party << "] Naive PSI: Phase 1 - Generating seeds" << std::endl;
 
     
-    // 阶段3: 接收clients的处理结果
+    // Phase 3: Receive processing results from clients
     std::cerr << "[Server" << party << "] Naive PSI: Phase 3 - Receiving client results" << std::endl;
     std::vector<int64_t> combined_result(tot_rounds, 0);
     for(auto& client_io : client_connections) {
@@ -1602,7 +1602,7 @@ int64_t psi_server_naive_fourwise(int party, emp::NetIO* server_io, std::vector<
         }
     }
     
-    // 阶段3: 计算最终结果
+    // Phase 4: Compute final result
     std::cerr << "[Server" << party << "] Naive PSI: Phase 4 - Computing final result" << std::endl;
 
     if(party == 1) {
@@ -1645,7 +1645,7 @@ int64_t psi_client_naive_fourwise(int client_id, int server_id, const std::vecto
 
     AESGen gen_seed(config.prg_seed);
 
-    // -------- Step 1: 预生成所有 round 的系数（AoS） --------
+    // -------- Step 1: Pre-generate coefficients for all rounds (AoS) --------
     std::vector<Deg3Coeff> coeffs(tot_rounds);
 
     auto get_u64x4 = [&](int round) -> std::array<uint64_t, 4> {
@@ -1671,7 +1671,7 @@ int64_t psi_client_naive_fourwise(int client_id, int server_id, const std::vecto
         coeffs[round].c3 = mod_p(words[3]);
     }
 
-    // -------- Step 2: items 转连续 uint64_t --------
+    // -------- Step 2: Convert items to contiguous uint64_t --------
     std::vector<uint64_t> items;
     items.reserve(input_set.size());
     std::vector<int64_t> weights;
@@ -1683,11 +1683,11 @@ int64_t psi_client_naive_fourwise(int client_id, int server_id, const std::vecto
 
     std::vector<int64_t> result(tot_rounds, 0);
 
-    // round tile 大小，建议试 128/256/512
+    // Round tile size; suggested values: 128/256/512
     constexpr int TILE = 256;
     constexpr int UNROLL = 8;
 
-    // -------- Step 3: over items 累加 --------
+    // -------- Step 3: Accumulate over items --------
     for (size_t idx = 0; idx < items.size(); ++idx) {
         const uint64_t x = items[idx];
         const int64_t weight = weights[idx];
@@ -1746,15 +1746,15 @@ int64_t psi_client_naive_fourwise(int client_id, int server_id, const std::vecto
 // Registration Mechanism
 // -----------------------------------------------------------
 
-// 函数指针类型定义
+// Function pointer type definitions
 using PsiServerFunc = int64_t(*)(int, emp::NetIO*, std::vector<emp::NetIO*>&);
 using PsiClientFunc = int64_t(*)(int, int, const std::vector<WeightedInput>&, emp::NetIO*);
 
-// 注册表
+// Registries
 static std::unordered_map<std::string, PsiServerFunc> server_registry;
 static std::unordered_map<std::string, PsiClientFunc> client_registry;
 
-// 注册函数
+// Registration functions
 void register_psi_server(const std::string& name, PsiServerFunc func) {
     server_registry[name] = func;
 }
@@ -1763,7 +1763,7 @@ void register_psi_client(const std::string& name, PsiClientFunc func) {
     client_registry[name] = func;
 }
 
-// 主函数 - 使用注册机制
+// Main dispatch functions using the registry mechanism
 int64_t psi_server(int party, emp::NetIO* server_io, std::vector<emp::NetIO*>& client_connections) {
     const GlobalConfig& config = get_config();
     std::string mode = config.psi_mode;
@@ -1786,7 +1786,7 @@ int64_t psi_client(int client_id, int server_id, const std::vector<WeightedInput
     return client_registry[mode](client_id, server_id, input_set, io);
 }
 
-// 静态注册
+// Static registration
 static bool register_functions() {
     register_psi_server("naive", psi_server_naive);
     register_psi_server("fhe", psi_server_fhe);
@@ -1799,5 +1799,5 @@ static bool register_functions() {
     return true;
 }
 
-// 静态变量确保注册在程序启动时执行
+// Static variable ensures registration runs at program startup
 static bool registered = register_functions();
