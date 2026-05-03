@@ -1,6 +1,6 @@
-# PSI
+# DPJC - distributed private join computation
 
-A two-server multi-client Private Set Intersection prototype with two backends: a `naive` mode for accuracy experiments and an `fhe` mode for end-to-end secure performance benchmarks.
+A two-server multi-client private join computation prototype with two backends: a `naive` mode for accuracy experiments and an `fhe` mode for end-to-end secure performance benchmarks.
 
 This README only covers what's needed to build and identify the binaries / scripts. For actual direct test guide (parameter sweeps, plotting, real-world data, WAN runs) see:
 
