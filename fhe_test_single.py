@@ -27,6 +27,9 @@ WEIGHTED_MULTILIMB_EXACT = False  # weighted mode only: limb-decomposed OLE path
 WEIGHTED_LIMB_BITS = 16
 WEIGHTED_CHUNK_K = 0  # weighted mode only: split each tt bucket into chunks in server recovery (0 = disabled)
 NUM_CLIENTS_PER_SERVER = 1
+CLIENT_THREADS = 1  # FHE client compute threads (1 = single-threaded; >1 enables multi-thread)
+PEER_CLIENT_THREADS = None  # If set, Server-2 clients use this; else same as CLIENT_THREADS
+CLIENT_LAZY_RELIN = False  # MT only; default off (negligible speedup with L2 cache)
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
 DEFAULT_SEAL_PLAIN_MODULUS_BIT = 24
@@ -382,6 +385,8 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     
     # Start clients
     client_processes = []
+    peer_threads = PEER_CLIENT_THREADS if PEER_CLIENT_THREADS is not None else CLIENT_THREADS
+    lazy_flag = " --client_lazy_relin" if CLIENT_LAZY_RELIN else ""
     
     # Start Server 1 clients
     for i in range(NUM_CLIENTS_PER_SERVER):
@@ -392,11 +397,12 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                      f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
+                     f"--client_threads={CLIENT_THREADS}{lazy_flag} " \
                      f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 1)")
         client_processes.append(client_process)
     
-    # Start Server 2 clients
+    # Start Server 2 clients (optional lighter peer for single-client microbench)
     for i in range(NUM_CLIENTS_PER_SERVER):
         client_id = i + 1
         data_file = server2_files[i]
@@ -405,6 +411,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                      f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
+                     f"--client_threads={peer_threads}{lazy_flag} " \
                      f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
@@ -567,7 +574,7 @@ def main():
     """Main function"""
     global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER
     global VERBOSE, MAX_WEIGHT, WEIGHTED_MULTILIMB_EXACT, WEIGHTED_LIMB_BITS, WEIGHTED_CHUNK_K
-    global SEAL_PLAIN_MODULUS_BIT
+    global SEAL_PLAIN_MODULUS_BIT, CLIENT_THREADS, PEER_CLIENT_THREADS, CLIENT_LAZY_RELIN
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -579,6 +586,15 @@ def main():
                        help='Seed size as power of 2 (e.g., 6 for 2^6 = 64 bits)')
     parser.add_argument('--num_clients_per_server', type=int, default=1,
                        help='Number of clients connected to each server (default: 1)')
+    parser.add_argument('--client_threads', type=int, default=1,
+                       help='FHE client compute worker threads (default: 1 = single-threaded)')
+    parser.add_argument('--peer_client_threads', type=int, default=None,
+                       help='Threads for Server-2 clients only (default: same as --client_threads). '
+                            'Use 1 for near-single-client microbench of Server-1 clients.')
+    parser.add_argument('--client_lazy_relin', action='store_true',
+                       help='Enable MT lazy relinearize (last tree mul relin deferred; usually negligible).')
+    parser.add_argument('--no_client_lazy_relin', action='store_true',
+                       help='Explicitly disable MT lazy relinearize (default).')
     parser.add_argument('--seal_plain_modulus', type=int, default=DEFAULT_SEAL_PLAIN_MODULUS_BIT,
                        help='SEAL plain_modulus bit-size (default: 24).')
     parser.add_argument('--seal_plain_modulus_auto_min', action='store_true',
@@ -608,12 +624,26 @@ def main():
     INTERSECTION_SIZE = SET_SIZE // 2
     PRG_DD = args.prg_dd
     NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
+    CLIENT_THREADS = args.client_threads
+    PEER_CLIENT_THREADS = args.peer_client_threads
+    if args.client_lazy_relin:
+        CLIENT_LAZY_RELIN = True
+    elif args.no_client_lazy_relin:
+        CLIENT_LAZY_RELIN = False
+    else:
+        CLIENT_LAZY_RELIN = False
     MAX_WEIGHT = args.max_weight
     SEAL_PLAIN_MODULUS_BIT = args.seal_plain_modulus
     WEIGHTED_MULTILIMB_EXACT = args.weighted_multilimb_exact
     WEIGHTED_LIMB_BITS = args.weighted_limb_bits
     WEIGHTED_CHUNK_K = args.weighted_chunk_k
     VERBOSE = args.verbose
+    if CLIENT_THREADS < 1:
+        log("Error: --client_threads must be >= 1", "ERROR")
+        return False
+    if PEER_CLIENT_THREADS is not None and PEER_CLIENT_THREADS < 1:
+        log("Error: --peer_client_threads must be >= 1", "ERROR")
+        return False
     if WEIGHTED_LIMB_BITS < 1 or WEIGHTED_LIMB_BITS > 16:
         log("Error: --weighted_limb_bits must be in [1,16]", "ERROR")
         return False
@@ -700,6 +730,9 @@ def main():
     log(f"PRG DD: {PRG_DD}")
     log(f"Clients per server: {NUM_CLIENTS_PER_SERVER}")
     log(f"Total clients: {2 * NUM_CLIENTS_PER_SERVER}")
+    log(f"Client compute threads: {CLIENT_THREADS}")
+    if PEER_CLIENT_THREADS is not None:
+        log(f"Peer (Server-2) client compute threads: {PEER_CLIENT_THREADS}")
     log(f"SEAL plain_modulus bit: {SEAL_PLAIN_MODULUS_BIT}")
     log(f"Max weight: {MAX_WEIGHT} ({'unweighted' if MAX_WEIGHT == 0 else f'random in [1, {MAX_WEIGHT}]'})")
     if MAX_WEIGHT > 0:

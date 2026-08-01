@@ -12,6 +12,7 @@
 #include <stack>
 #include <cstring>
 #include <algorithm>
+#include <numeric>
 #include <random>
 #include <chrono>
 #include <iomanip>
@@ -1072,19 +1073,16 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
         iorecv(party, io, context, encrypted_seed[i]);
     }
     
-    // Process input set - single-threaded version
-    // Start client computation timing
+    // Process input set.
+    // Default (--client_threads=1): original single-thread lazy t_map loop (unchanged structure).
+    // Multi-thread (--client_threads>1): shared pair-cache + zero-copy leaf pointers +
+    // thread-local reusable tree buffers (no per-item leaf ciphertext copies).
     auto client_compute_start = std::chrono::high_resolution_clock::now();
+    auto ms_since = [](std::chrono::high_resolution_clock::time_point a,
+                       std::chrono::high_resolution_clock::time_point b) {
+        return std::chrono::duration_cast<std::chrono::duration<double>>(b - a).count();
+    };
 
-    std::cerr << "[Client" << config.party << "] Using 1 thread for " 
-              << input_set.size() << " items" << std::endl;
-
-    std::unordered_map<uint64_t, Ciphertext> t_map;
-    std::stack<std::pair<int, Ciphertext>> t_stack;
-    AESGen aes_gen(0);
-    std::vector<Ciphertext> calc_prg(config.prg_dd);
-    std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
-    Plaintext weight_plain;
     const uint64_t plain_modulus = parms.plain_modulus().value();
     const bool use_double_add_for_weight =
         config.weighted_mode && is_default_8192_seal_profile(config);
@@ -1093,83 +1091,524 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
                   << "double-add (default 8192 profile)" << std::endl;
     }
 
-    for(const auto& item : input_set) {
-        std::vector<int> ids = aes_gen.get_id_group(0, item.value);
-        sort(ids.begin(), ids.end());
+    int num_threads = config.client_threads;
+    if (num_threads < 1) {
+        num_threads = 1;
+    }
+    if (!input_set.empty() && num_threads > static_cast<int>(input_set.size())) {
+        num_threads = static_cast<int>(input_set.size());
+    }
 
-        // Process PRG computation
-        for(int i = 0; i < config.prg_dd; i += 2) {
-            if(i + 1 == config.prg_dd) {
-                calc_prg[i] = encrypted_seed[ids[i]];
-                evaluator.mod_switch_to_next_inplace(calc_prg[i]);
-            } else {
-                uint64_t key = ((uint64_t)ids[i] << 32) | ids[i + 1];
-                if(t_map.count(key)) {
-                    calc_prg[i] = t_map[key];
-                } else {
-                    evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i + 1]], calc_prg[i]);
-                    evaluator.relinearize_inplace(calc_prg[i], relin_key);
+    ASSERT_MSG(!input_set.empty(), "FHE client input_set must be non-empty");
+
+    // One psi_client process uses this many workers; a full LAN test starts 2 clients.
+    std::cerr << "[Client" << config.party << "] Using " << num_threads
+              << " thread(s) for " << input_set.size() << " items"
+              << " (this process only; peer clients are separate processes)" << std::endl;
+
+    Ciphertext esti_cipher;
+    double phase_pair_cache_s = 0.0;
+    double phase_item_tree_s = 0.0;      // wall for ST; max-thread for MT
+    double phase_stack_merge_s = 0.0;    // wall for ST; max-thread for MT
+    double phase_item_process_wall_s = 0.0;
+    double phase_partial_merge_s = 0.0;
+    double phase_item_tree_sum_s = 0.0;  // CPU-sum across workers (MT)
+    double phase_stack_merge_sum_s = 0.0;
+    size_t phase_unique_pairs = 0;
+
+    if (num_threads <= 1) {
+        // ---- Original single-thread path (lazy per-thread t_map) ----
+        std::unordered_map<uint64_t, Ciphertext> t_map;
+        std::stack<std::pair<int, Ciphertext>> t_stack;
+        AESGen aes_gen(0);
+        std::vector<Ciphertext> calc_prg(config.prg_dd);
+        std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
+        Plaintext weight_plain;
+
+        for (const auto& item : input_set) {
+            std::vector<int> ids = aes_gen.get_id_group(0, item.value);
+            sort(ids.begin(), ids.end());
+
+            for (int i = 0; i < config.prg_dd; i += 2) {
+                if (i + 1 == config.prg_dd) {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    calc_prg[i] = encrypted_seed[ids[i]];
                     evaluator.mod_switch_to_next_inplace(calc_prg[i]);
-                    t_map[key] = calc_prg[i];
-                }
-            }
-        }
-
-        if (item.weight != 1) {
-            const uint64_t encoded_weight = encode_weight_without_scaling(
-                item.weight, plain_modulus);
-            if (encoded_weight != 1) {
-                if (use_double_add_for_weight) {
-                    calc_prg[0] = mul_cipher_by_scalar_double_add(calc_prg[0], encoded_weight, evaluator);
+                    phase_pair_cache_s += ms_since(t0, std::chrono::high_resolution_clock::now());
                 } else {
-                    std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
-                    for (int round = 0; round < tot_rounds; ++round) {
-                        weight_slots[round] = encoded_weight;
+                    uint64_t key = ((uint64_t)ids[i] << 32) | ids[i + 1];
+                    if (t_map.count(key)) {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        calc_prg[i] = t_map[key];
+                        phase_pair_cache_s += ms_since(t0, std::chrono::high_resolution_clock::now());
+                    } else {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        evaluator.multiply(encrypted_seed[ids[i]], encrypted_seed[ids[i + 1]], calc_prg[i]);
+                        evaluator.relinearize_inplace(calc_prg[i], relin_key);
+                        evaluator.mod_switch_to_next_inplace(calc_prg[i]);
+                        t_map[key] = calc_prg[i];
+                        phase_pair_cache_s += ms_since(t0, std::chrono::high_resolution_clock::now());
                     }
-                    batch_encoder.encode(weight_slots, weight_plain);
-                    evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
                 }
+            }
+
+            {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                if (item.weight != 1) {
+                    const uint64_t encoded_weight = encode_weight_without_scaling(
+                        item.weight, plain_modulus);
+                    if (encoded_weight != 1) {
+                        if (use_double_add_for_weight) {
+                            calc_prg[0] = mul_cipher_by_scalar_double_add(calc_prg[0], encoded_weight, evaluator);
+                        } else {
+                            std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
+                            for (int round = 0; round < tot_rounds; ++round) {
+                                weight_slots[round] = encoded_weight;
+                            }
+                            batch_encoder.encode(weight_slots, weight_plain);
+                            evaluator.multiply_plain_inplace(calc_prg[0], weight_plain);
+                        }
+                    }
+                }
+
+                for (int w = 2; w < config.prg_dd; w <<= 1) {
+                    for (int i = 0; i < config.prg_dd; i += (w << 1)) {
+                        if (i + w < config.prg_dd) {
+                            evaluator.multiply_inplace(calc_prg[i], calc_prg[i + w]);
+                            evaluator.relinearize_inplace(calc_prg[i], relin_key);
+                        }
+                    }
+                }
+                phase_item_tree_s += ms_since(t0, std::chrono::high_resolution_clock::now());
+            }
+
+            {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto sum_prg = std::make_pair(1, calc_prg[0]);
+                while (!t_stack.empty()) {
+                    auto top = t_stack.top();
+                    ASSERT_MSG(abs(top.first) >= abs(sum_prg.first), "stack top should be larger than current");
+                    if (top.first == sum_prg.first) {
+                        evaluator.add_inplace(sum_prg.second, top.second);
+                        sum_prg.first <<= 1;
+                        t_stack.pop();
+                    } else break;
+                }
+                t_stack.push(sum_prg);
+                phase_stack_merge_s += ms_since(t0, std::chrono::high_resolution_clock::now());
             }
         }
 
-        // Multi-level multiplication
-        for(int w = 2; w < config.prg_dd; w <<= 1) {
-            for(int i = 0; i < config.prg_dd; i += (w << 1)) {
-                if(i + w < config.prg_dd) {
-                    evaluator.multiply_inplace(calc_prg[i], calc_prg[i + w]);
-                    evaluator.relinearize_inplace(calc_prg[i], relin_key);
-                }
-            }
-        }
-
-        // Accumulate into the stack
-        auto sum_prg = std::make_pair(1, calc_prg[0]);
-        while(!t_stack.empty()) {
-            auto top = t_stack.top();
-            ASSERT_MSG(abs(top.first) >= abs(sum_prg.first), "stack top should be larger than current");
-            if(top.first == sum_prg.first) {
-                evaluator.add_inplace(sum_prg.second, top.second);
-                sum_prg.first <<= 1;
+        {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            esti_cipher = t_stack.top().second;
+            t_stack.pop();
+            while (!t_stack.empty()) {
+                evaluator.add_inplace(esti_cipher, t_stack.top().second);
                 t_stack.pop();
-            } else break;
+            }
+            phase_stack_merge_s += ms_since(t0, std::chrono::high_resolution_clock::now());
         }
-        t_stack.push(sum_prg);
+        phase_unique_pairs = t_map.size();
+        phase_item_process_wall_s = phase_item_tree_s + phase_stack_merge_s;
+        phase_item_tree_sum_s = phase_item_tree_s;
+        phase_stack_merge_sum_s = phase_stack_merge_s;
+    } else {
+        // ---- Multi-thread path: shared pair-cache + zero-copy leaves ----
+        std::vector<std::vector<int>> item_ids(input_set.size());
+        {
+            AESGen aes_gen(0);
+            for (size_t idx = 0; idx < input_set.size(); ++idx) {
+                item_ids[idx] = aes_gen.get_id_group(0, input_set[idx].value);
+                std::sort(item_ids[idx].begin(), item_ids[idx].end());
+            }
+        }
+
+        // Reorder items by pair-key locality so nearby items reuse the same
+        // shared-cache ciphertexts (better L3 / DRAM behavior). Additive merge
+        // is order-independent for correctness. Single-thread path is untouched.
+        std::vector<WeightedInput> ordered_items;
+        {
+            const size_t n_items = input_set.size();
+            const int dd = static_cast<int>(config.prg_dd);
+            std::vector<size_t> order(n_items);
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                const auto& ids_a = item_ids[a];
+                const auto& ids_b = item_ids[b];
+                for (int i = 0; i + 1 < dd; i += 2) {
+                    const uint64_t ka = (static_cast<uint64_t>(ids_a[i]) << 32)
+                                      | static_cast<uint64_t>(ids_a[i + 1]);
+                    const uint64_t kb = (static_cast<uint64_t>(ids_b[i]) << 32)
+                                      | static_cast<uint64_t>(ids_b[i + 1]);
+                    if (ka != kb) {
+                        return ka < kb;
+                    }
+                }
+                // Stable-ish tie-break on element value.
+                return input_set[a].value < input_set[b].value;
+            });
+
+            ordered_items.resize(n_items);
+            std::vector<std::vector<int>> ordered_ids(n_items);
+            for (size_t i = 0; i < n_items; ++i) {
+                ordered_items[i] = input_set[order[i]];
+                ordered_ids[i] = std::move(item_ids[order[i]]);
+            }
+            item_ids.swap(ordered_ids);
+            std::cerr << "[Client" << config.party
+                      << "] Reordered items by pair-key locality" << std::endl;
+        }
+
+        std::vector<uint64_t> unique_pair_keys;
+        {
+            std::unordered_set<uint64_t> key_set;
+            for (const auto& ids : item_ids) {
+                for (int i = 0; i + 1 < static_cast<int>(config.prg_dd); i += 2) {
+                    uint64_t key = (static_cast<uint64_t>(ids[i]) << 32)
+                                 | static_cast<uint64_t>(ids[i + 1]);
+                    key_set.insert(key);
+                }
+            }
+            unique_pair_keys.assign(key_set.begin(), key_set.end());
+        }
+        phase_unique_pairs = unique_pair_keys.size();
+
+        // Level-2 cache keys: product of two adjacent pair-products in the PRG tree
+        // (w=2 step). Same algebraic result, fewer mul+relin on hits.
+        struct Level2Key {
+            uint64_t k0 = 0;
+            uint64_t k1 = 0;
+            bool operator==(const Level2Key& o) const { return k0 == o.k0 && k1 == o.k1; }
+        };
+        struct Level2KeyHash {
+            size_t operator()(const Level2Key& k) const {
+                return std::hash<uint64_t>()(k.k0) ^ (std::hash<uint64_t>()(k.k1) + 0x9e3779b97f4a7c15ULL);
+            }
+        };
+        auto make_pair_key = [](int a, int b) -> uint64_t {
+            return (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
+        };
+
+        std::vector<Level2Key> unique_l2_keys;
+        {
+            std::unordered_set<Level2Key, Level2KeyHash> l2_set;
+            const int dd = static_cast<int>(config.prg_dd);
+            for (const auto& ids : item_ids) {
+                // Matches tree step w=2: combine pair-slots at i and i+2 for i = 0,4,8,...
+                for (int i = 0; i + 3 < dd; i += 4) {
+                    l2_set.insert(Level2Key{
+                        make_pair_key(ids[i], ids[i + 1]),
+                        make_pair_key(ids[i + 2], ids[i + 3])
+                    });
+                }
+            }
+            unique_l2_keys.assign(l2_set.begin(), l2_set.end());
+        }
+
+        std::cerr << "[Client" << config.party << "] Shared pair-cache unique keys: "
+                  << unique_pair_keys.size()
+                  << ", level2 unique keys: " << unique_l2_keys.size()
+                  << ", lazy_relin: " << (config.client_lazy_relin ? "on" : "off")
+                  << std::endl;
+
+        std::unordered_map<uint64_t, Ciphertext> shared_t_map;
+        shared_t_map.reserve(unique_pair_keys.size());
+        std::unordered_map<Level2Key, Ciphertext, Level2KeyHash> shared_l2_map;
+        shared_l2_map.reserve(unique_l2_keys.size());
+        {
+            auto cache_t0 = std::chrono::high_resolution_clock::now();
+            std::vector<Ciphertext> products(unique_pair_keys.size());
+            auto fill_range = [&](size_t begin, size_t end) {
+                for (size_t k = begin; k < end; ++k) {
+                    const uint64_t key = unique_pair_keys[k];
+                    const int id0 = static_cast<int>(key >> 32);
+                    const int id1 = static_cast<int>(key & 0xffffffffu);
+                    evaluator.multiply(encrypted_seed[id0], encrypted_seed[id1], products[k]);
+                    evaluator.relinearize_inplace(products[k], relin_key);
+                    evaluator.mod_switch_to_next_inplace(products[k]);
+                }
+            };
+
+            const size_t nk = unique_pair_keys.size();
+            if (nk > 0) {
+                const int key_threads = std::min(num_threads, static_cast<int>(nk));
+                const size_t chunk =
+                    (nk + static_cast<size_t>(key_threads) - 1) / static_cast<size_t>(key_threads);
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<size_t>(key_threads));
+                for (int t = 0; t < key_threads; ++t) {
+                    const size_t begin = static_cast<size_t>(t) * chunk;
+                    const size_t end = std::min(begin + chunk, nk);
+                    if (begin < end) {
+                        workers.emplace_back(fill_range, begin, end);
+                    }
+                }
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+            }
+            for (size_t k = 0; k < unique_pair_keys.size(); ++k) {
+                shared_t_map.emplace(unique_pair_keys[k], std::move(products[k]));
+            }
+
+            // Build level-2 products from pair-cache (parallel).
+            std::vector<Ciphertext> l2_products(unique_l2_keys.size());
+            auto fill_l2 = [&](size_t begin, size_t end) {
+                for (size_t k = begin; k < end; ++k) {
+                    const Level2Key& key = unique_l2_keys[k];
+                    auto it0 = shared_t_map.find(key.k0);
+                    auto it1 = shared_t_map.find(key.k1);
+                    ASSERT_MSG(it0 != shared_t_map.end() && it1 != shared_t_map.end(),
+                               "level2 fill missing pair-cache entry");
+                    evaluator.multiply(it0->second, it1->second, l2_products[k]);
+                    evaluator.relinearize_inplace(l2_products[k], relin_key);
+                }
+            };
+            const size_t nl2 = unique_l2_keys.size();
+            if (nl2 > 0) {
+                const int l2_threads = std::min(num_threads, static_cast<int>(nl2));
+                const size_t chunk =
+                    (nl2 + static_cast<size_t>(l2_threads) - 1) / static_cast<size_t>(l2_threads);
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<size_t>(l2_threads));
+                for (int t = 0; t < l2_threads; ++t) {
+                    const size_t begin = static_cast<size_t>(t) * chunk;
+                    const size_t end = std::min(begin + chunk, nl2);
+                    if (begin < end) {
+                        workers.emplace_back(fill_l2, begin, end);
+                    }
+                }
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+            }
+            for (size_t k = 0; k < unique_l2_keys.size(); ++k) {
+                shared_l2_map.emplace(unique_l2_keys[k], std::move(l2_products[k]));
+            }
+            phase_pair_cache_s = ms_since(cache_t0, std::chrono::high_resolution_clock::now());
+        }
+
+        struct RangeTiming {
+            Ciphertext ct;
+            double tree_s = 0.0;
+            double stack_s = 0.0;
+        };
+
+        // Process [begin, end) over locality-ordered items; leaves/L2 from shared caches.
+        auto process_range = [&](size_t begin, size_t end) -> RangeTiming {
+            RangeTiming out;
+            std::stack<std::pair<int, Ciphertext>> t_stack;
+            const int dd = static_cast<int>(config.prg_dd);
+            std::vector<const Ciphertext*> node_ptr(static_cast<size_t>(dd), nullptr);
+            std::vector<Ciphertext> tree_buf[2] = {
+                std::vector<Ciphertext>(static_cast<size_t>(dd)),
+                std::vector<Ciphertext>(static_cast<size_t>(dd)),
+            };
+            Ciphertext odd_leaf;
+            Ciphertext weighted_root;
+            std::vector<uint64_t> weight_slots(batch_encoder.slot_count(), 0ull);
+            Plaintext weight_plain;
+
+            for (size_t idx = begin; idx < end; ++idx) {
+                const auto& item = ordered_items[idx];
+                const auto& ids = item_ids[idx];
+
+                for (int i = 0; i < dd; i += 2) {
+                    if (i + 1 == dd) {
+                        odd_leaf = encrypted_seed[ids[i]];
+                        evaluator.mod_switch_to_next_inplace(odd_leaf);
+                        node_ptr[static_cast<size_t>(i)] = &odd_leaf;
+                    } else {
+                        uint64_t key = make_pair_key(ids[i], ids[i + 1]);
+                        auto it = shared_t_map.find(key);
+                        ASSERT_MSG(it != shared_t_map.end(), "missing shared pair-cache entry");
+                        node_ptr[static_cast<size_t>(i)] = &it->second;
+                    }
+                }
+
+                {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+
+                    // Largest w with w < dd: the final tree multiply level.
+                    int last_w = 2;
+                    while ((last_w << 1) < dd) {
+                        last_w <<= 1;
+                    }
+
+                    // Weight after full product (equiv. to scaling first pair before tree)
+                    // so level-2 cache stays valid for the i=0 slot.
+                    int dest_bank = 0;
+                    for (int w = 2; w < dd; w <<= 1) {
+                        auto& dest = tree_buf[dest_bank];
+                        const bool skip_relin =
+                            config.client_lazy_relin && (w == last_w);
+                        if (w == 2) {
+                            for (int i = 0; i < dd; i += (w << 1)) {
+                                if (i + w >= dd) {
+                                    continue;
+                                }
+                                // Prefer shared level-2 product when both children are pairs.
+                                if (i + 3 < dd) {
+                                    Level2Key l2k{
+                                        make_pair_key(ids[i], ids[i + 1]),
+                                        make_pair_key(ids[i + 2], ids[i + 3])
+                                    };
+                                    auto it = shared_l2_map.find(l2k);
+                                    ASSERT_MSG(it != shared_l2_map.end(),
+                                               "missing shared level2-cache entry");
+                                    node_ptr[static_cast<size_t>(i)] = &it->second;
+                                    continue;
+                                }
+                                evaluator.multiply(
+                                    *node_ptr[static_cast<size_t>(i)],
+                                    *node_ptr[static_cast<size_t>(i + w)],
+                                    dest[static_cast<size_t>(i)]);
+                                if (!skip_relin) {
+                                    evaluator.relinearize_inplace(
+                                        dest[static_cast<size_t>(i)], relin_key);
+                                }
+                                node_ptr[static_cast<size_t>(i)] = &dest[static_cast<size_t>(i)];
+                            }
+                        } else {
+                            for (int i = 0; i < dd; i += (w << 1)) {
+                                if (i + w < dd) {
+                                    evaluator.multiply(
+                                        *node_ptr[static_cast<size_t>(i)],
+                                        *node_ptr[static_cast<size_t>(i + w)],
+                                        dest[static_cast<size_t>(i)]);
+                                    if (!skip_relin) {
+                                        evaluator.relinearize_inplace(
+                                            dest[static_cast<size_t>(i)], relin_key);
+                                    }
+                                    node_ptr[static_cast<size_t>(i)] =
+                                        &dest[static_cast<size_t>(i)];
+                                }
+                            }
+                        }
+                        dest_bank ^= 1;
+                    }
+
+                    if (item.weight != 1) {
+                        const uint64_t encoded_weight = encode_weight_without_scaling(
+                            item.weight, plain_modulus);
+                        if (encoded_weight != 1) {
+                            weighted_root = *node_ptr[0];
+                            if (use_double_add_for_weight) {
+                                weighted_root = mul_cipher_by_scalar_double_add(
+                                    weighted_root, encoded_weight, evaluator);
+                            } else {
+                                std::fill(weight_slots.begin(), weight_slots.end(), 0ull);
+                                for (int round = 0; round < tot_rounds; ++round) {
+                                    weight_slots[round] = encoded_weight;
+                                }
+                                batch_encoder.encode(weight_slots, weight_plain);
+                                evaluator.multiply_plain_inplace(weighted_root, weight_plain);
+                            }
+                            node_ptr[0] = &weighted_root;
+                        }
+                    }
+                    out.tree_s += ms_since(t0, std::chrono::high_resolution_clock::now());
+                }
+
+                {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    auto sum_prg = std::make_pair(1, *node_ptr[0]);
+                    while (!t_stack.empty()) {
+                        auto top = t_stack.top();
+                        ASSERT_MSG(abs(top.first) >= abs(sum_prg.first), "stack top should be larger than current");
+                        if (top.first == sum_prg.first) {
+                            evaluator.add_inplace(sum_prg.second, top.second);
+                            sum_prg.first <<= 1;
+                            t_stack.pop();
+                        } else break;
+                    }
+                    t_stack.push(sum_prg);
+                    out.stack_s += ms_since(t0, std::chrono::high_resolution_clock::now());
+                }
+            }
+
+            {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                out.ct = t_stack.top().second;
+                t_stack.pop();
+                while (!t_stack.empty()) {
+                    evaluator.add_inplace(out.ct, t_stack.top().second);
+                    t_stack.pop();
+                }
+                // Lazy relin: one RelinKeys pass for the whole worker range (size 3→2).
+                if (config.client_lazy_relin && out.ct.size() > 2) {
+                    evaluator.relinearize_inplace(out.ct, relin_key);
+                }
+                out.stack_s += ms_since(t0, std::chrono::high_resolution_clock::now());
+            }
+            return out;
+        };
+
+        const size_t n = ordered_items.size();
+        const size_t chunk =
+            (n + static_cast<size_t>(num_threads) - 1) / static_cast<size_t>(num_threads);
+        std::vector<RangeTiming> partials(static_cast<size_t>(num_threads));
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(num_threads));
+
+        auto item_t0 = std::chrono::high_resolution_clock::now();
+        for (int t = 0; t < num_threads; ++t) {
+            const size_t begin = static_cast<size_t>(t) * chunk;
+            const size_t end = std::min(begin + chunk, n);
+            workers.emplace_back([&, t, begin, end]() {
+                if (begin < end) {
+                    partials[t] = process_range(begin, end);
+                }
+            });
+        }
+        for (auto& worker : workers) {
+            worker.join();
+        }
+        phase_item_process_wall_s = ms_since(item_t0, std::chrono::high_resolution_clock::now());
+
+        for (int t = 0; t < num_threads; ++t) {
+            phase_item_tree_sum_s += partials[static_cast<size_t>(t)].tree_s;
+            phase_stack_merge_sum_s += partials[static_cast<size_t>(t)].stack_s;
+            phase_item_tree_s = std::max(phase_item_tree_s, partials[static_cast<size_t>(t)].tree_s);
+            phase_stack_merge_s = std::max(phase_stack_merge_s, partials[static_cast<size_t>(t)].stack_s);
+        }
+
+        {
+            auto merge_t0 = std::chrono::high_resolution_clock::now();
+            bool merged = false;
+            for (int t = 0; t < num_threads; ++t) {
+                const size_t begin = static_cast<size_t>(t) * chunk;
+                const size_t end = std::min(begin + chunk, n);
+                if (begin >= end) {
+                    continue;
+                }
+                if (!merged) {
+                    esti_cipher = std::move(partials[static_cast<size_t>(t)].ct);
+                    merged = true;
+                } else {
+                    evaluator.add_inplace(esti_cipher, partials[static_cast<size_t>(t)].ct);
+                }
+            }
+            ASSERT_MSG(merged, "multi-thread client compute produced no partial ciphertext");
+            phase_partial_merge_s = ms_since(merge_t0, std::chrono::high_resolution_clock::now());
+        }
     }
 
-    // Final merge
-    Ciphertext esti_cipher = t_stack.top().second;
-    t_stack.pop();
-    while(!t_stack.empty()) {
-        evaluator.add_inplace(esti_cipher, t_stack.top().second);
-        t_stack.pop();
-    }
-
-    // Compute client computation time
     auto client_compute_end = std::chrono::high_resolution_clock::now();
-    auto client_compute_duration = std::chrono::duration_cast<std::chrono::milliseconds>(client_compute_end - client_compute_start);
-    double client_compute_time = client_compute_duration.count() / 1000.0;
-    
+    double client_compute_time = ms_since(client_compute_start, client_compute_end);
+
     std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
+    std::cerr << "client_phase_unique_pairs: " << phase_unique_pairs << std::endl;
+    std::cerr << "client_phase_pair_cache_s: " << phase_pair_cache_s << std::endl;
+    std::cerr << "client_phase_item_tree_s: " << phase_item_tree_s
+              << " (crit_path_max_thread)" << std::endl;
+    std::cerr << "client_phase_stack_merge_s: " << phase_stack_merge_s
+              << " (crit_path_max_thread)" << std::endl;
+    std::cerr << "client_phase_item_tree_sum_s: " << phase_item_tree_sum_s << std::endl;
+    std::cerr << "client_phase_stack_merge_sum_s: " << phase_stack_merge_sum_s << std::endl;
+    std::cerr << "client_phase_item_process_wall_s: " << phase_item_process_wall_s << std::endl;
+    std::cerr << "client_phase_partial_merge_s: " << phase_partial_merge_s << std::endl;
     std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
 
     // Send result to the corresponding server

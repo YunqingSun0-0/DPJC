@@ -37,7 +37,14 @@ struct GlobalConfig {
     */
     
     int num_clients_per_server = 1;
-    
+
+    int client_threads = 1; // FHE client compute: number of worker threads (1 = single-threaded)
+    // MT only: skip relinearize on the last PRG-tree multiply; add size-3 results in
+    // the stack, then relinearize once per worker. Default RelinKeys only support 3→2,
+    // so earlier tree levels still relinearize eagerly (or come from L2 cache).
+    // Default off: measured gain was negligible (~5.3s→5.11s) with L2 cache present.
+    bool client_lazy_relin = false;
+
     void parse_args(int argc, char** argv);
 
     std::string role_description(int party) const {

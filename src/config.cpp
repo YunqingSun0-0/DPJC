@@ -51,6 +51,17 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             seal_plain_modulus = std::stoul(val);
         } else if (auto val = get_value("--num_clients_per_server="); !val.empty()) {
             num_clients_per_server = std::stoi(val);
+        } else if (auto val = get_value("--client_threads="); !val.empty()) {
+            client_threads = std::stoi(val);
+            if (client_threads < 1) {
+                throw std::invalid_argument("--client_threads must be >= 1");
+            }
+        } else if (auto val = get_value("--client_lazy_relin="); !val.empty()) {
+            client_lazy_relin = (std::stoi(val) != 0);
+        } else if (arg == "--client_lazy_relin") {
+            client_lazy_relin = true;
+        } else if (arg == "--no_client_lazy_relin") {
+            client_lazy_relin = false;
         } else if (auto val = get_value("--weight_scale_div="); !val.empty()) {
             (void)val;
             // Deprecated: weight scaling is disabled. Keep arg for compatibility.
