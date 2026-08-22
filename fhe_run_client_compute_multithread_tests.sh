@@ -104,54 +104,61 @@ for prg_dd in "${PRG_DD_VALUES[@]}"; do
         log_both "Running test: client_size=2^${size_bit}=${client_size}, prg_dd=${prg_dd}, threads=${CLIENT_THREADS}, peer=${PEER_CLIENT_THREADS}, runs=${RUNS_TO_AVERAGE}"
 
         sum_client_compute_time=0
-        successful_runs=0
-        failed_runs=0
+        timed_runs=0
+        missing_time_runs=0
+        protocol_fail_runs=0
 
         for run_idx in $(seq 1 "${RUNS_TO_AVERAGE}"); do
             temp_log="${LOG_DIR}/.temp_test_mt_${size_bit}_${prg_dd}_${run_idx}.log"
             log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: starting"
 
-            if cd "${REPO_DIR}" && python3 fhe_test_single.py \
+            # Microbench cares about client compute time, not protocol pass/fail.
+            # Always try to scrape timing even when fhe_test_single.py exits non-zero.
+            set +e
+            cd "${REPO_DIR}" && python3 fhe_test_single.py \
                 --set_size_bit "${size_bit}" \
                 --prg_dd "${prg_dd}" \
                 --client_threads "${CLIENT_THREADS}" \
                 --peer_client_threads "${PEER_CLIENT_THREADS}" \
                 --output_log "${temp_log}" \
-                >> "${FULL_LOG_FILE}" 2>&1; then
+                >> "${FULL_LOG_FILE}" 2>&1
+            test_rc=$?
+            set -e
 
-                if [ -f "${temp_log}" ]; then
-                    # Prefer Server-1 client timing (first Client computation time in log)
-                    client_compute_time=$(grep -oP 'Client computation time: \K[\d.]+(?=s)' "${temp_log}" | head -1)
-
-                    if [ -n "${client_compute_time}" ]; then
-                        sum_client_compute_time=$(awk -v s="${sum_client_compute_time}" -v t="${client_compute_time}" 'BEGIN { printf "%.12f", s + t }')
-                        successful_runs=$((successful_runs + 1))
-                        log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: client_compute_time=${client_compute_time}s"
-                    else
-                        failed_runs=$((failed_runs + 1))
-                        log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: missing client compute time"
-                    fi
-                else
-                    failed_runs=$((failed_runs + 1))
-                    log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: temp log not found"
-                fi
-
-                rm -f "${temp_log}"
-            else
-                failed_runs=$((failed_runs + 1))
-                log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: test command failed"
-                rm -f "${temp_log}"
+            if [ "${test_rc}" -ne 0 ]; then
+                protocol_fail_runs=$((protocol_fail_runs + 1))
             fi
+
+            client_compute_time=""
+            if [ -f "${temp_log}" ]; then
+                # Prefer Server-1 client timing (first Client computation time in log)
+                client_compute_time=$(grep -oP 'Client computation time: \K[\d.]+(?=s)' "${temp_log}" | head -1 || true)
+            fi
+
+            if [ -n "${client_compute_time}" ]; then
+                sum_client_compute_time=$(awk -v s="${sum_client_compute_time}" -v t="${client_compute_time}" 'BEGIN { printf "%.12f", s + t }')
+                timed_runs=$((timed_runs + 1))
+                if [ "${test_rc}" -eq 0 ]; then
+                    log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: client_compute_time=${client_compute_time}s"
+                else
+                    log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: client_compute_time=${client_compute_time}s (protocol exit=${test_rc}, timing kept)"
+                fi
+            else
+                missing_time_runs=$((missing_time_runs + 1))
+                log_full "  Run ${run_idx}/${RUNS_TO_AVERAGE}: missing client compute time (protocol exit=${test_rc})"
+            fi
+
+            rm -f "${temp_log}"
         done
 
-        if [ "${successful_runs}" -gt 0 ]; then
-            avg_client_compute_time=$(awk -v s="${sum_client_compute_time}" -v n="${successful_runs}" 'BEGIN { printf "%.6f", s / n }')
+        if [ "${timed_runs}" -gt 0 ]; then
+            avg_client_compute_time=$(awk -v s="${sum_client_compute_time}" -v n="${timed_runs}" 'BEGIN { printf "%.6f", s / n }')
             avg_client_compute_ms_per_element=$(awk -v t="${avg_client_compute_time}" -v n="${client_size}" 'BEGIN { printf "%.6f", (t * 1000.0) / n }')
-            log_both "✓ Test passed - 2^${size_bit}: avg=${avg_client_compute_time}s (successful_runs=${successful_runs}, failed_runs=${failed_runs})"
-            log_analysis "  2^${size_bit} (size=${client_size}): avg=${avg_client_compute_time}s over ${successful_runs}/${RUNS_TO_AVERAGE} runs (${avg_client_compute_ms_per_element} ms/element)"
+            log_both "✓ Timing ok - 2^${size_bit}: avg=${avg_client_compute_time}s (timed_runs=${timed_runs}/${RUNS_TO_AVERAGE}, protocol_fail=${protocol_fail_runs}, missing_time=${missing_time_runs})"
+            log_analysis "  2^${size_bit} (size=${client_size}): avg=${avg_client_compute_time}s over ${timed_runs}/${RUNS_TO_AVERAGE} timed runs (${avg_client_compute_ms_per_element} ms/element); protocol_fail=${protocol_fail_runs}"
         else
-            log_both "✗ Test failed for 2^${size_bit}: no successful runs (failed_runs=${failed_runs})"
-            log_analysis "  2^${size_bit} (size=${client_size}): FAILED (0/${RUNS_TO_AVERAGE} successful runs)"
+            log_both "✗ No timing for 2^${size_bit}: missing_time=${missing_time_runs}, protocol_fail=${protocol_fail_runs}"
+            log_analysis "  2^${size_bit} (size=${client_size}): NO TIMING (0/${RUNS_TO_AVERAGE} timed runs; protocol_fail=${protocol_fail_runs})"
         fi
     done
 done
