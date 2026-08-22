@@ -62,6 +62,12 @@ void GlobalConfig::parse_args(int argc, char** argv) {
             client_lazy_relin = true;
         } else if (arg == "--no_client_lazy_relin") {
             client_lazy_relin = false;
+        } else if (auto val = get_value("--client_skip_compute="); !val.empty()) {
+            client_skip_compute = (std::stoi(val) != 0);
+        } else if (arg == "--client_skip_compute") {
+            client_skip_compute = true;
+        } else if (arg == "--no_client_skip_compute") {
+            client_skip_compute = false;
         } else if (auto val = get_value("--weight_scale_div="); !val.empty()) {
             (void)val;
             // Deprecated: weight scaling is disabled. Keep arg for compatibility.

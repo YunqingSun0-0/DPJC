@@ -44,6 +44,10 @@ struct GlobalConfig {
     // so earlier tree levels still relinearize eagerly (or come from L2 cache).
     // Default off: measured gain was negligible (~5.3s→5.11s) with L2 cache present.
     bool client_lazy_relin = false;
+    // Microbench only: skip PRG-tree FHE compute and send a cheap placeholder
+    // ciphertext so the peer client does not burn CPU/DRAM. Protocol result is
+    // not meaningful when this is set.
+    bool client_skip_compute = false;
 
     void parse_args(int argc, char** argv);
 

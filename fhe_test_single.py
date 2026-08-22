@@ -30,6 +30,7 @@ NUM_CLIENTS_PER_SERVER = 1
 CLIENT_THREADS = 1  # FHE client compute threads (1 = single-threaded; >1 enables multi-thread)
 PEER_CLIENT_THREADS = None  # If set, Server-2 clients use this; else same as CLIENT_THREADS
 CLIENT_LAZY_RELIN = False  # MT only; default off (negligible speedup with L2 cache)
+PEER_SKIP_COMPUTE = False  # If True, Server-2 clients skip FHE tree (microbench only)
 OUTPUT_DIR = "./test_fhe_single"
 PORT = 22000
 DEFAULT_SEAL_PLAIN_MODULUS_BIT = 24
@@ -387,6 +388,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
     client_processes = []
     peer_threads = PEER_CLIENT_THREADS if PEER_CLIENT_THREADS is not None else CLIENT_THREADS
     lazy_flag = " --client_lazy_relin" if CLIENT_LAZY_RELIN else ""
+    peer_skip_flag = " --client_skip_compute" if PEER_SKIP_COMPUTE else ""
     
     # Start Server 1 clients
     for i in range(NUM_CLIENTS_PER_SERVER):
@@ -411,7 +413,7 @@ def run_fhe_test(server1_files, server2_files, seed_size_bit):
                      f"--num_clients_per_server={NUM_CLIENTS_PER_SERVER} " \
                      f"--seed_size_bit={seed_size_bit} --prg_dd={prg_dd} " \
                      f"--seal_plain_modulus={SEAL_PLAIN_MODULUS_BIT} " \
-                     f"--client_threads={peer_threads}{lazy_flag} " \
+                     f"--client_threads={peer_threads}{lazy_flag}{peer_skip_flag} " \
                      f"--network_mode={network_mode}{weighted_flag}{weighted_multilimb_flag}{weighted_chunk_flag}"
         client_process = start_process(client_cmd, f"Client {client_id} (Server 2)")
         client_processes.append(client_process)
@@ -575,6 +577,7 @@ def main():
     global SET_SIZE, LOG_FILE, INTERSECTION_SIZE, PRG_DD, NUM_CLIENTS_PER_SERVER
     global VERBOSE, MAX_WEIGHT, WEIGHTED_MULTILIMB_EXACT, WEIGHTED_LIMB_BITS, WEIGHTED_CHUNK_K
     global SEAL_PLAIN_MODULUS_BIT, CLIENT_THREADS, PEER_CLIENT_THREADS, CLIENT_LAZY_RELIN
+    global PEER_SKIP_COMPUTE
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='FHE PSI Single Test')
@@ -591,6 +594,9 @@ def main():
     parser.add_argument('--peer_client_threads', type=int, default=None,
                        help='Threads for Server-2 clients only (default: same as --client_threads). '
                             'Use 1 for near-single-client microbench of Server-1 clients.')
+    parser.add_argument('--peer_skip_compute', action='store_true',
+                       help='Server-2 clients skip FHE PRG-tree and send a placeholder ciphertext '
+                            '(microbench only; protocol result will be wrong).')
     parser.add_argument('--client_lazy_relin', action='store_true',
                        help='Enable MT lazy relinearize (last tree mul relin deferred; usually negligible).')
     parser.add_argument('--no_client_lazy_relin', action='store_true',
@@ -626,6 +632,7 @@ def main():
     NUM_CLIENTS_PER_SERVER = args.num_clients_per_server
     CLIENT_THREADS = args.client_threads
     PEER_CLIENT_THREADS = args.peer_client_threads
+    PEER_SKIP_COMPUTE = bool(args.peer_skip_compute)
     if args.client_lazy_relin:
         CLIENT_LAZY_RELIN = True
     elif args.no_client_lazy_relin:
@@ -733,6 +740,8 @@ def main():
     log(f"Client compute threads: {CLIENT_THREADS}")
     if PEER_CLIENT_THREADS is not None:
         log(f"Peer (Server-2) client compute threads: {PEER_CLIENT_THREADS}")
+    if PEER_SKIP_COMPUTE:
+        log("Peer (Server-2) client_skip_compute: enabled (placeholder ciphertext)")
     log(f"SEAL plain_modulus bit: {SEAL_PLAIN_MODULUS_BIT}")
     log(f"Max weight: {MAX_WEIGHT} ({'unweighted' if MAX_WEIGHT == 0 else f'random in [1, {MAX_WEIGHT}]'})")
     if MAX_WEIGHT > 0:

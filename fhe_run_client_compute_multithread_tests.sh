@@ -4,16 +4,18 @@
 # Same sweep as fhe_run_client_compute_tests.sh, but enables multi-thread
 # client compute via --client_threads.
 #
-# Peer (Server-2) clients default to 1 thread so the measured Server-1 client
-# is not bandwidth-contended by a second N-thread worker. Single-thread tests
+# Peer (Server-2) clients default to 1 thread + skip FHE compute so the measured
+# Server-1 client is not bandwidth-contended by a second worker. Protocol result
+# is not meaningful in that mode; timing still is. Single-thread tests
 # (fhe_run_client_compute_tests.sh / default fhe_test_single.py) are unchanged.
 #
 # Usage:
 #   ./fhe_run_client_compute_multithread_tests.sh [RUNS] [THREADS] [PEER_THREADS]
 #
 # Examples:
-#   ./fhe_run_client_compute_multithread_tests.sh           # 1 run, 4 threads, peer=1
-#   ./fhe_run_client_compute_multithread_tests.sh 5 32      # 5 runs, 32 threads, peer=1
+#   ./fhe_run_client_compute_multithread_tests.sh           # 1 run, 4 threads, peer=1 skip
+#   ./fhe_run_client_compute_multithread_tests.sh 5 32      # 5 runs, 32 threads, peer=1 skip
+#   PEER_SKIP_COMPUTE=0 ./fhe_run_client_compute_multithread_tests.sh 1 32 1  # real peer compute
 #   ./fhe_run_client_compute_multithread_tests.sh 1 32 32   # dual heavy peers (old behavior)
 #
 # Creates two logs under fhe_phase/:
@@ -37,6 +39,9 @@ CLIENT_THREADS="${2:-4}"
 # Default peer to 1 thread: protocol still needs Server-2 client, but it
 # should not burn N threads and steal DRAM bandwidth from the measured side.
 PEER_CLIENT_THREADS="${3:-1}"
+# Default: peer skips FHE tree (placeholder ciphertext). Set PEER_SKIP_COMPUTE=0
+# to force a real peer compute.
+PEER_SKIP_COMPUTE="${PEER_SKIP_COMPUTE:-1}"
 
 if ! [[ "${RUNS_TO_AVERAGE}" =~ ^[0-9]+$ ]] || [ "${RUNS_TO_AVERAGE}" -lt 1 ]; then
     echo "Error: RUNS_TO_AVERAGE must be a positive integer (got '${RUNS_TO_AVERAGE}')"
@@ -51,6 +56,11 @@ fi
 if ! [[ "${PEER_CLIENT_THREADS}" =~ ^[0-9]+$ ]] || [ "${PEER_CLIENT_THREADS}" -lt 1 ]; then
     echo "Error: PEER_CLIENT_THREADS must be a positive integer (got '${PEER_CLIENT_THREADS}')"
     exit 1
+fi
+
+PEER_SKIP_ARGS=()
+if [ "${PEER_SKIP_COMPUTE}" = "1" ] || [ "${PEER_SKIP_COMPUTE}" = "true" ] || [ "${PEER_SKIP_COMPUTE}" = "TRUE" ]; then
+    PEER_SKIP_ARGS+=(--peer_skip_compute)
 fi
 
 mkdir -p "${LOG_DIR}"
@@ -79,6 +89,7 @@ log_both "Client sizes bits: ${CLIENT_SIZES_BITS[*]}"
 log_both "PRG DD values: ${PRG_DD_VALUES[*]}"
 log_both "Measured client_threads: ${CLIENT_THREADS}"
 log_both "Peer (Server-2) client_threads: ${PEER_CLIENT_THREADS}"
+log_both "Peer skip compute: ${PEER_SKIP_COMPUTE}"
 log_both "Runs to average per test: ${RUNS_TO_AVERAGE}"
 log_both "Logs:"
 log_both "  - Full log: ${FULL_LOG_FILE}"
@@ -88,15 +99,15 @@ log_both "=========================================================="
 log_analysis "=========================================================="
 log_analysis "FHE Client Compute Time Analysis (Multi-thread)"
 log_analysis "=========================================================="
-log_analysis "client_threads=${CLIENT_THREADS}  peer_client_threads=${PEER_CLIENT_THREADS}"
+log_analysis "client_threads=${CLIENT_THREADS}  peer_client_threads=${PEER_CLIENT_THREADS}  peer_skip_compute=${PEER_SKIP_COMPUTE}"
 log_analysis "Format: client_size (2^N) | PRG_DD | Avg Client Compute Time (s, N runs) | Avg Client Compute Time (ms/element)"
 log_analysis "=========================================================="
 
 for prg_dd in "${PRG_DD_VALUES[@]}"; do
     log_both ""
-    log_both "--- Testing with PRG_DD=${prg_dd}, client_threads=${CLIENT_THREADS}, peer_threads=${PEER_CLIENT_THREADS} ---"
+    log_both "--- Testing with PRG_DD=${prg_dd}, client_threads=${CLIENT_THREADS}, peer_threads=${PEER_CLIENT_THREADS}, peer_skip=${PEER_SKIP_COMPUTE} ---"
     log_analysis ""
-    log_analysis "PRG_DD=${prg_dd} (threads=${CLIENT_THREADS}, peer=${PEER_CLIENT_THREADS}):"
+    log_analysis "PRG_DD=${prg_dd} (threads=${CLIENT_THREADS}, peer=${PEER_CLIENT_THREADS}, peer_skip=${PEER_SKIP_COMPUTE}):"
 
     for size_bit in "${CLIENT_SIZES_BITS[@]}"; do
         client_size=$((2 ** size_bit))
@@ -120,6 +131,7 @@ for prg_dd in "${PRG_DD_VALUES[@]}"; do
                 --prg_dd "${prg_dd}" \
                 --client_threads "${CLIENT_THREADS}" \
                 --peer_client_threads "${PEER_CLIENT_THREADS}" \
+                "${PEER_SKIP_ARGS[@]}" \
                 --output_log "${temp_log}" \
                 >> "${FULL_LOG_FILE}" 2>&1
             test_rc=$?

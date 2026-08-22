@@ -1116,7 +1116,17 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     double phase_stack_merge_sum_s = 0.0;
     size_t phase_unique_pairs = 0;
 
-    if (num_threads <= 1) {
+    if (config.client_skip_compute) {
+        // Cheap placeholder at the same coeff-modulus level as a post-pair product
+        // (seed then one mod_switch). Lets the peer finish immediately so the
+        // measured client is not DRAM-contended / the harness is not wall-clock
+        // blocked on a full single-thread peer compute.
+        std::cerr << "[Client" << config.party
+                  << "] client_skip_compute=1: skipping FHE PRG-tree; sending placeholder"
+                  << std::endl;
+        esti_cipher = encrypted_seed[0];
+        evaluator.mod_switch_to_next_inplace(esti_cipher);
+    } else if (num_threads <= 1) {
         // ---- Original single-thread path (lazy per-thread t_map) ----
         std::unordered_map<uint64_t, Ciphertext> t_map;
         std::stack<std::pair<int, Ciphertext>> t_stack;
@@ -1598,17 +1608,25 @@ int64_t psi_client_fhe(int client_id, int server_id, const std::vector<WeightedI
     auto client_compute_end = std::chrono::high_resolution_clock::now();
     double client_compute_time = ms_since(client_compute_start, client_compute_end);
 
-    std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
-    std::cerr << "client_phase_unique_pairs: " << phase_unique_pairs << std::endl;
-    std::cerr << "client_phase_pair_cache_s: " << phase_pair_cache_s << std::endl;
-    std::cerr << "client_phase_item_tree_s: " << phase_item_tree_s
-              << " (crit_path_max_thread)" << std::endl;
-    std::cerr << "client_phase_stack_merge_s: " << phase_stack_merge_s
-              << " (crit_path_max_thread)" << std::endl;
-    std::cerr << "client_phase_item_tree_sum_s: " << phase_item_tree_sum_s << std::endl;
-    std::cerr << "client_phase_stack_merge_sum_s: " << phase_stack_merge_sum_s << std::endl;
-    std::cerr << "client_phase_item_process_wall_s: " << phase_item_process_wall_s << std::endl;
-    std::cerr << "client_phase_partial_merge_s: " << phase_partial_merge_s << std::endl;
+    if (config.client_skip_compute) {
+        // Different label so microbench scrapers that look for
+        // "Client computation time:" do not pick up the peer placeholder.
+        std::cerr << "Client computation time (skipped): " << client_compute_time << "s"
+                  << std::endl;
+    } else {
+        std::cerr << "Client computation time: " << client_compute_time << "s" << std::endl;
+        std::cerr << "client_phase_unique_pairs: " << phase_unique_pairs << std::endl;
+        std::cerr << "client_phase_pair_cache_s: " << phase_pair_cache_s << std::endl;
+        std::cerr << "client_phase_item_tree_s: " << phase_item_tree_s
+                  << " (crit_path_max_thread)" << std::endl;
+        std::cerr << "client_phase_stack_merge_s: " << phase_stack_merge_s
+                  << " (crit_path_max_thread)" << std::endl;
+        std::cerr << "client_phase_item_tree_sum_s: " << phase_item_tree_sum_s << std::endl;
+        std::cerr << "client_phase_stack_merge_sum_s: " << phase_stack_merge_sum_s << std::endl;
+        std::cerr << "client_phase_item_process_wall_s: " << phase_item_process_wall_s
+                  << std::endl;
+        std::cerr << "client_phase_partial_merge_s: " << phase_partial_merge_s << std::endl;
+    }
     std::cerr << "[Client" << config.party << "] Processing completed" << std::endl;
 
     // Send result to the corresponding server
